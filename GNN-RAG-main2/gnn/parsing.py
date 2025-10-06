@@ -63,7 +63,15 @@ def add_shared_args(parser):
     parser.add_argument('--test_batch_size', default=20, type=int)
     parser.add_argument('--q_type', default='seq', type=str)
 
-
+def create_parser_HyperReasonerNet(parser):
+    parser.add_argument('--model_name', default='HyperReasonerNet', type=str, choices=['HyperReasonerNet'])
+    parser.add_argument('--num_gnn', default=3, type=int)
+    parser.add_argument('--num_iter', default=1, type=int)
+    parser.add_argument('--loss_type', default='kl', type=str)
+    parser.add_argument('--data_eff', action='store_true')
+    parser.add_argument('--norm_rel', action='store_true')
+    add_shared_args(parser)
+    pass
 
 def add_parse_args(parser):
     
@@ -81,6 +89,8 @@ def add_parse_args(parser):
     parser_nutrea = subparsers.add_parser("NuTrea")
     create_parser_nutrea(parser_nutrea)
 
+    parse_HyperReasonerNet = subparsers.add_parser("HyperReasonerNet")
+    create_parser_HyperReasonerNet(parse_HyperReasonerNet)
 
 def create_parser_rearev(parser):
 
