@@ -599,7 +599,7 @@ class SingleDataLoader(BasicDataLoader):
     """
     def __init__(self, config, word2id, relation2id, entity2id, tokenize, data_type="train"):
         super(SingleDataLoader, self).__init__(config, word2id, relation2id, entity2id, tokenize, data_type)
-        
+
     def get_batch(self, iteration, batch_size, fact_dropout, q_type=None, test=False):
         start = batch_size * iteration
         end = min(batch_size * (iteration + 1), self.num_data)
@@ -613,24 +613,29 @@ class SingleDataLoader(BasicDataLoader):
         seed_dist = self.seed_distribution[sample_ids]
         q_input = self.deal_q_type(q_type)
         kb_adj_mats = self._build_fact_mat(sample_ids, fact_dropout=fact_dropout)
-        
+
+        # 使用列表推导来正确地获取当前批次的 g2l maps
+        g2l_maps_batch = [self.global2local_entity_maps[i] for i in sample_ids]
+
         if test:
             return self.candidate_entities[sample_ids], \
-                   self.query_entities[sample_ids], \
-                   kb_adj_mats, \
-                   q_input, \
-                   seed_dist, \
-                   true_batch_id, \
-                   self.answer_dists[sample_ids], \
-                   self.answer_lists[sample_ids],\
+                self.query_entities[sample_ids], \
+                kb_adj_mats, \
+                q_input, \
+                seed_dist, \
+                true_batch_id, \
+                self.answer_dists[sample_ids], \
+                self.answer_lists[sample_ids], \
+                g2l_maps_batch  # 返回新创建的列表
 
         return self.candidate_entities[sample_ids], \
-               self.query_entities[sample_ids], \
-               kb_adj_mats, \
-               q_input, \
-               seed_dist, \
-               true_batch_id, \
-               self.answer_dists[sample_ids]
+            self.query_entities[sample_ids], \
+            kb_adj_mats, \
+            q_input, \
+            seed_dist, \
+            true_batch_id, \
+            self.answer_dists[sample_ids], \
+            g2l_maps_batch  # 返回新创建的列表
 
 
 def load_dict(filename):

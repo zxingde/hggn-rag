@@ -148,3 +148,31 @@ class Attention(nn.Module):
         output = self.tanh(output)
 
         return output, attention_weights
+
+
+class DiffusionFusion(nn.Module):
+    """用于融合GNN和HGNN节点表示的模块"""
+
+    def __init__(self, d_hid):
+        super(DiffusionFusion, self).__init__()
+        # 定义一个门控线性层，学习两种表示的权重
+        self.gate = nn.Linear(d_hid * 2, d_hid, bias=True)
+
+    def forward(self, gnn_emb, hgnn_emb):
+        """
+        输入:
+            gnn_emb (Tensor): GNN输出的节点嵌入
+            hgnn_emb (Tensor): HGNN输出的节点嵌入
+        输出:
+            fused_emb (Tensor): 融合后的节点嵌入
+        """
+        # 将两个嵌入拼接
+        combined_emb = torch.cat([gnn_emb, hgnn_emb], dim=-1)
+
+        # 计算门控值
+        gate_val = torch.sigmoid(self.gate(combined_emb))
+
+        # 根据门控值加权融合
+        fused_emb = gate_val * gnn_emb + (1 - gate_val) * hgnn_emb
+
+        return fused_emb

@@ -12,7 +12,7 @@ from tqdm import tqdm
 tqdm.monitor_iterval = 0
 
 
-
+from models.ReaRevHGNN.rearevhgnn import ReaRevHGNN
 #from dataset_load_paths import load_data
 from dataset_load import load_data
 from dataset_load_graft import load_data_graft
@@ -58,6 +58,11 @@ class Trainer_KBQA(object):
         elif model_name == 'HyperReasonerNet':
             self.model = HyperReasonerNet(self.args, len(self.entity2id), self.num_kb_relation,
                                           self.num_word)
+
+        elif model_name == 'ReaRevHGNN':
+            self.model = ReaRevHGNN(self.args, len(self.entity2id), self.num_kb_relation,
+                                    self.num_word)
+
         # elif model_name == 'NuTrea':
         #     self.model = NuTrea(self.args,  len(self.entity2id), self.num_kb_relation,
         #                           self.num_word)

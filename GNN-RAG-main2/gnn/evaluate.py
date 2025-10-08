@@ -164,7 +164,7 @@ class Evaluator:
                 seed_dist, true_batch_id, answer_dist, answer_list = batch
             else:
                 local_entity, query_entities, _, query_text, \
-                seed_dist, true_batch_id, answer_dist, answer_list = batch
+                    seed_dist, true_batch_id, answer_dist, answer_list, _ = batch
             # self.true_batch_id = true_batch_id
             if write_info:
                 obj_list = self.write_info(valid_data, tp_list, self.model.num_iter)
