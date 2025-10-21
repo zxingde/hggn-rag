@@ -61,7 +61,7 @@ class Trainer_KBQA(object):
 
         elif model_name == 'ReaRevHGNN':
             self.model = ReaRevHGNN(self.args, len(self.entity2id), self.num_kb_relation,
-                                    self.num_word)
+                                    self.num_word, self.relation2id)
 
         # elif model_name == 'NuTrea':
         #     self.model = NuTrea(self.args,  len(self.entity2id), self.num_kb_relation,

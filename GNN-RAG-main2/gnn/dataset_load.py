@@ -44,6 +44,8 @@ class BasicDataLoader(object):
 
         with open(data_file) as f_in:
             for line in tqdm(f_in):
+                if index >= 10:  # 调试代码：硬限制为10条
+                    break
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
                 
@@ -402,7 +404,7 @@ class BasicDataLoader(object):
             elif tokenize == 'roberta':
                 tokenizer_name = 'roberta-base'
             elif tokenize == 'sbert':
-                tokenizer_name = 'sentence-transformers/all-MiniLM-L6-v2'
+                tokenizer_name = '/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert'
             elif tokenize == 'sbert2':
                 tokenizer_name = 'sentence-transformers/all-mpnet-base-v2'
             elif tokenize == 'simcse':
@@ -411,8 +413,8 @@ class BasicDataLoader(object):
                 tokenizer_name = 't5-small'
             elif tokenize  == 'relbert':
                 tokenizer_name = 'pretrained_lms/sr-simbert/'
-            
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, local_files_only=True)  # <--- 添加参数
             pad_val = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
             self.rel_texts = np.full((self.num_kb_relation + 1, self.max_rel_words), pad_val, dtype=int)
             self.rel_texts_inv = np.full((self.num_kb_relation + 1, self.max_rel_words), pad_val, dtype=int)
@@ -625,8 +627,7 @@ class SingleDataLoader(BasicDataLoader):
                 seed_dist, \
                 true_batch_id, \
                 self.answer_dists[sample_ids], \
-                self.answer_lists[sample_ids], \
-                g2l_maps_batch  # 返回新创建的列表
+                self.answer_lists[sample_ids],
 
         return self.candidate_entities[sample_ids], \
             self.query_entities[sample_ids], \
@@ -634,8 +635,7 @@ class SingleDataLoader(BasicDataLoader):
             q_input, \
             seed_dist, \
             true_batch_id, \
-            self.answer_dists[sample_ids], \
-            g2l_maps_batch  # 返回新创建的列表
+            self.answer_dists[sample_ids],
 
 
 def load_dict(filename):

@@ -135,6 +135,7 @@ class ReaRev(BaseModel):
         """
         # batch_size = local_entity.size(0)
         self.local_entity = local_entity
+        # 2*(8*50)  2*(8*16*1)
         self.instruction_list, self.attn_list = self.instruction(q_input)
         rel_features, rel_features_inv  = self.get_rel_feature()
         self.local_entity_emb = self.get_ent_init(local_entity, kb_adj_mat, rel_features)

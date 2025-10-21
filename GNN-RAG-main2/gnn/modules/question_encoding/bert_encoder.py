@@ -10,7 +10,7 @@ from torch.nn import LayerNorm
 import warnings
 warnings.filterwarnings("ignore")
 import os
-os.environ['TRANSFORMERS_CACHE'] = '/export/scratch/costas/home/mavro016/.cache'
+# os.environ['TRANSFORMERS_CACHE'] = '/export/scratch/costas/home/mavro016/.cache'
 
 from .base_encoder import BaseInstruction
 
@@ -36,9 +36,9 @@ class BERTInstruction(BaseInstruction):
             self.pretrained_weights = 'roberta-base'
             word_dim = 768#self.word_dim
         elif model == 'sbert':
-            self.tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
-            self.pretrained_weights = 'sentence-transformers/all-MiniLM-L6-v2'
-            word_dim = 384#self.word_dim
+            self.tokenizer = AutoTokenizer.from_pretrained('/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert',local_files_only=True)
+            self.pretrained_weights = '/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert'
+            word_dim = 768#self.word_dim
         elif model == 'simcse':
             #print('ok')
             self.tokenizer = AutoTokenizer.from_pretrained('princeton-nlp/sup-simcse-bert-base-uncased')
@@ -75,7 +75,7 @@ class BERTInstruction(BaseInstruction):
         # initialize entity embedding
         word_dim = self.word_dim
         entity_dim = self.entity_dim
-        self.node_encoder = AutoModel.from_pretrained(self.pretrained_weights)
+        self.node_encoder = AutoModel.from_pretrained(self.pretrained_weights, local_files_only=True)
         print('Total Params', sum(p.numel() for p in self.node_encoder.parameters()))
         if self.lm_frozen == 1:
             print('Freezing LM params')
