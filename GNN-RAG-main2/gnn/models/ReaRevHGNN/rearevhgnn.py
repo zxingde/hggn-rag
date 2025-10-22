@@ -160,7 +160,7 @@ class ReaRevHGNN(BaseModel):
 
         # --- 模块修改与新增 ---
         # 1. 超图构建器 (使用新的基于关系的构造器)
-        self.hypergraph_constructor = RelationCommunityConstructor(args, num_entity)
+        # self.hypergraph_constructor = RelationCommunityConstructor(args, num_entity)
 
         # 2. HGNN推理模块 (已重构)
         self.num_hyper_gnn_layers = args.get('num_hyper_gnn_layers', self.num_gnn)
@@ -228,7 +228,7 @@ class ReaRevHGNN(BaseModel):
         修改后的 Forward 流程: (GNN -> HGNN -> Fusion -> 指令更新) x T次
         """
         # --- 步骤 1: 解包并转换输入数据 ---
-        local_entity, query_entities, kb_adj_mat, query_text, seed_dist, true_batch_id, answer_dist = batch
+        local_entity, query_entities, kb_adj_mat, batch_hyperedges, query_text, seed_dist, true_batch_id, answer_dist = batch
         local_entity = torch.from_numpy(local_entity).type('torch.LongTensor').to(self.device)
         query_entities = torch.from_numpy(query_entities).type('torch.FloatTensor').to(self.device)
         answer_dist = torch.from_numpy(answer_dist).type('torch.FloatTensor').to(self.device)
@@ -247,8 +247,8 @@ class ReaRevHGNN(BaseModel):
             self.instruction.relational_ins = relational_ins
 
         # --- 步骤 3: 超图构建 (在循环外构建一次) ---
-        batch_hyperedges = self.hypergraph_constructor(kb_adj_mat, local_entity, self.relation2id)
-        max_num_hyperedges = max(len(h) for h in batch_hyperedges) if batch_hyperedges else 0
+        # batch_hyperedges = self.hypergraph_constructor(kb_adj_mat, local_entity, self.relation2id)
+        max_num_hyperedges = max(len(h) for h in batch_hyperedges) if len(batch_hyperedges) > 0 else 0
 
         # --- 步骤 4: 迭代推理 (GNN -> HGNN -> Fusion -> Update) ---
         gnn_entity_emb = None

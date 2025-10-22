@@ -10,6 +10,9 @@ import pickle
 warnings.filterwarnings("ignore")
 from modules.question_encoding.tokenizers import LSTMTokenizer#, BERTTokenizer
 from transformers import AutoTokenizer
+import networkx as nx
+import community as community_louvain
+from collections import defaultdict
 import time
 
 import os
@@ -25,6 +28,7 @@ class BasicDataLoader(object):
         self.tokenize = tokenize
         self._parse_args(config, word2id, relation2id, entity2id)
         self._load_file(config, data_type)
+        self.model_name = config.get('model_name', None)
         self._load_data()
         
 
@@ -44,8 +48,8 @@ class BasicDataLoader(object):
 
         with open(data_file) as f_in:
             for line in tqdm(f_in):
-                if index >= 10:  # 调试代码：硬限制为10条
-                    break
+                # if index >= 10:  # 调试代码：硬限制为10条
+                #     break
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
                 
@@ -84,6 +88,7 @@ class BasicDataLoader(object):
         # self.query_texts = np.full((self.num_data, self.max_query_word), len(self.word2id), dtype=int)
         self.answer_dists = np.zeros((self.num_data, self.max_local_entity), dtype=float)
         self.answer_lists = np.empty(self.num_data, dtype=object)
+        self.hyperedges = np.empty(self.num_data, dtype=object)
 
         self._prepare_data()
 
@@ -339,7 +344,47 @@ class BasicDataLoader(object):
                 self.kb_adj_mats[next_id] = (np.array(head_list, dtype=int),
                                          np.array(rel_list, dtype=int),
                                          np.array(tail_list, dtype=int))
+                # ================== 开始预构建超图 ==================
+            if self.model_name == 'ReaRevHGNN':
+                # 根据 data_eff 标志获取邻接表
+                if not self.data_eff:
+                    (head_list, rel_list, tail_list) = self.kb_adj_mats[next_id]
+                else:
+                    # 如果 data_eff=True, 邻接矩阵是动态创建的，我们在这里重新创建一次
+                    (head_list, rel_list, tail_list) = self.create_kb_adj_mats(sample_id=next_id)
 
+                g2l = self.global2local_entity_maps[next_id]
+                num_nodes_in_sample = len(g2l)
+                hyperedges_for_one_graph = set()
+
+                if num_nodes_in_sample > 0 and len(head_list) > 0:
+                    # 这段逻辑是从 RelationCommunityConstructor 迁移过来的
+                    graphs_by_relation = [nx.Graph() for _ in range(len(self.relation2id))]
+                    num_relations = len(self.relation2id)  # 仅限前向关系
+
+                    for h, r, t in zip(head_list, rel_list, tail_list):
+                        if r < num_relations:  # 只使用前向关系
+                            graphs_by_relation[r].add_edge(h, t)
+
+                    for rel_graph in graphs_by_relation:
+                        if rel_graph.number_of_nodes() > 0:
+                            try:
+                                # 运行社区发现
+                                partition = community_louvain.best_partition(rel_graph)
+                                communities = defaultdict(list)
+                                for node, community_id in partition.items():
+                                    communities[community_id].append(node)
+
+                                # 将社区添加为超边
+                                for community_id, nodes in communities.items():
+                                    if len(nodes) > 1:
+                                        hyperedges_for_one_graph.add(tuple(sorted(nodes)))
+                            except Exception as e:
+                                # 捕获社区发现中可能出现的错误（例如图太小）
+                                pass
+
+                self.hyperedges[next_id] = list(hyperedges_for_one_graph)
+            # ================== 结束预构建超图 ==================
             next_id += 1
         num_no_query_ent = 0
         num_one_query_ent = 0
@@ -619,6 +664,30 @@ class SingleDataLoader(BasicDataLoader):
         # 使用列表推导来正确地获取当前批次的 g2l maps
         g2l_maps_batch = [self.global2local_entity_maps[i] for i in sample_ids]
 
+        # ---!!! 核心修改：根据 model_name 返回不同长度的 batch !!!---
+        if self.model_name == 'ReaRevHGNN':
+            batch_hyperedges = self.hyperedges[sample_ids]  # 获取预存的超图
+            if test:
+                return self.candidate_entities[sample_ids], \
+                    self.query_entities[sample_ids], \
+                    kb_adj_mats, \
+                    batch_hyperedges, \
+                    q_input, \
+                    seed_dist, \
+                    true_batch_id, \
+                    self.answer_dists[sample_ids], \
+                    self.answer_lists[sample_ids]  # (9 项)
+
+            return self.candidate_entities[sample_ids], \
+                self.query_entities[sample_ids], \
+                kb_adj_mats, \
+                batch_hyperedges, \
+                q_input, \
+                seed_dist, \
+                true_batch_id, \
+                self.answer_dists[sample_ids]  # (8 项)
+
+        # --- 如果不是 ReaRevHGNN，则返回原始 batch (保持其他模型兼容) ---
         if test:
             return self.candidate_entities[sample_ids], \
                 self.query_entities[sample_ids], \
@@ -627,7 +696,7 @@ class SingleDataLoader(BasicDataLoader):
                 seed_dist, \
                 true_batch_id, \
                 self.answer_dists[sample_ids], \
-                self.answer_lists[sample_ids],
+                self.answer_lists[sample_ids]  # (8 项)
 
         return self.candidate_entities[sample_ids], \
             self.query_entities[sample_ids], \
@@ -635,7 +704,7 @@ class SingleDataLoader(BasicDataLoader):
             q_input, \
             seed_dist, \
             true_batch_id, \
-            self.answer_dists[sample_ids],
+            self.answer_dists[sample_ids]  # (7 项)
 
 
 def load_dict(filename):

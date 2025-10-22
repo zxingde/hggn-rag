@@ -162,6 +162,9 @@ class Evaluator:
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
                 seed_dist, true_batch_id, answer_dist, answer_list = batch
+            elif self.model_name == 'ReaRevHGNN':  # <--- 添加这个 ELIF 块
+                local_entity, query_entities, _, batch_hyperedges, query_text, \
+                    seed_dist, true_batch_id, answer_dist, answer_list = batch
             else:
                 local_entity, query_entities, _, query_text, \
                     seed_dist, true_batch_id, answer_dist, answer_list= batch
