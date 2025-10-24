@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 import networkx as nx
 import community as community_louvain
 from collections import defaultdict
+from torch_geometric.data import Data, Batch
 import time
 
 import os
@@ -48,8 +49,8 @@ class BasicDataLoader(object):
 
         with open(data_file) as f_in:
             for line in tqdm(f_in):
-                # if index >= 10:  # 调试代码：硬限制为10条
-                #     break
+                if index >= 10:  # 调试代码：硬限制为10条
+                    break
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
                 
@@ -88,7 +89,8 @@ class BasicDataLoader(object):
         # self.query_texts = np.full((self.num_data, self.max_query_word), len(self.word2id), dtype=int)
         self.answer_dists = np.zeros((self.num_data, self.max_local_entity), dtype=float)
         self.answer_lists = np.empty(self.num_data, dtype=object)
-        self.hyperedges = np.empty(self.num_data, dtype=object)
+        # self.hyperedges = np.empty(self.num_data, dtype=object) # <--- 删除这行
+        self.hypergraph_data = np.empty(self.num_data, dtype=object)  # <--- 添加这行
 
         self._prepare_data()
 
@@ -344,13 +346,11 @@ class BasicDataLoader(object):
                 self.kb_adj_mats[next_id] = (np.array(head_list, dtype=int),
                                          np.array(rel_list, dtype=int),
                                          np.array(tail_list, dtype=int))
-                # ================== 开始预构建超图 ==================
+            # ================== 开始预构建 PyG 超图 ==================
             if self.model_name == 'ReaRevHGNN':
-                # 根据 data_eff 标志获取邻接表
                 if not self.data_eff:
                     (head_list, rel_list, tail_list) = self.kb_adj_mats[next_id]
                 else:
-                    # 如果 data_eff=True, 邻接矩阵是动态创建的，我们在这里重新创建一次
                     (head_list, rel_list, tail_list) = self.create_kb_adj_mats(sample_id=next_id)
 
                 g2l = self.global2local_entity_maps[next_id]
@@ -358,33 +358,47 @@ class BasicDataLoader(object):
                 hyperedges_for_one_graph = set()
 
                 if num_nodes_in_sample > 0 and len(head_list) > 0:
-                    # 这段逻辑是从 RelationCommunityConstructor 迁移过来的
                     graphs_by_relation = [nx.Graph() for _ in range(len(self.relation2id))]
-                    num_relations = len(self.relation2id)  # 仅限前向关系
-
+                    num_relations = len(self.relation2id)
                     for h, r, t in zip(head_list, rel_list, tail_list):
-                        if r < num_relations:  # 只使用前向关系
+                        if r < num_relations:
                             graphs_by_relation[r].add_edge(h, t)
-
                     for rel_graph in graphs_by_relation:
                         if rel_graph.number_of_nodes() > 0:
                             try:
-                                # 运行社区发现
                                 partition = community_louvain.best_partition(rel_graph)
                                 communities = defaultdict(list)
                                 for node, community_id in partition.items():
                                     communities[community_id].append(node)
-
-                                # 将社区添加为超边
                                 for community_id, nodes in communities.items():
                                     if len(nodes) > 1:
                                         hyperedges_for_one_graph.add(tuple(sorted(nodes)))
                             except Exception as e:
-                                # 捕获社区发现中可能出现的错误（例如图太小）
                                 pass
 
-                self.hyperedges[next_id] = list(hyperedges_for_one_graph)
-            # ================== 结束预构建超图 ==================
+                                # --- PyG 转换逻辑 ---
+                hyperedges_list = list(hyperedges_for_one_graph)
+                num_hyperedges_in_sample = len(hyperedges_list)
+
+                # 创建二部图索引: [节点, 超边]
+                edge_index_rows = []  # 节点索引
+                edge_index_cols = []  # 超边索引 (从 0 到 num_hyperedges_in_sample-1)
+
+                for he_idx, he_tuple in enumerate(hyperedges_list):
+                    for node_idx in he_tuple:
+                        if node_idx < num_nodes_in_sample:  # 安全检查
+                            edge_index_rows.append(node_idx)
+                            edge_index_cols.append(he_idx)
+
+                hyperedge_index = torch.tensor([edge_index_rows, edge_index_cols], dtype=torch.long)
+
+                # 创建 PyG Data 对象
+                pyg_data = Data(num_nodes=num_nodes_in_sample, hyperedge_index=hyperedge_index)
+                pyg_data.num_hyperedges = num_hyperedges_in_sample  # 存储超边数量
+
+                self.hypergraph_data[next_id] = pyg_data
+
+                # ================== 结束预构建超图 ==================
             next_id += 1
         num_no_query_ent = 0
         num_one_query_ent = 0
@@ -652,26 +666,24 @@ class SingleDataLoader(BasicDataLoader):
         end = min(batch_size * (iteration + 1), self.num_data)
         sample_ids = self.batches[start: end]
         self.sample_ids = sample_ids
-        # true_batch_id, sample_ids, seed_dist = self.deal_multi_seed(ori_sample_ids)
-        # self.sample_ids = sample_ids
-        # self.true_sample_ids = ori_sample_ids
-        # self.batch_ids = true_batch_id
+
         true_batch_id = None
         seed_dist = self.seed_distribution[sample_ids]
         q_input = self.deal_q_type(q_type)
         kb_adj_mats = self._build_fact_mat(sample_ids, fact_dropout=fact_dropout)
-
-        # 使用列表推导来正确地获取当前批次的 g2l maps
         g2l_maps_batch = [self.global2local_entity_maps[i] for i in sample_ids]
 
         # ---!!! 核心修改：根据 model_name 返回不同长度的 batch !!!---
         if self.model_name == 'ReaRevHGNN':
-            batch_hyperedges = self.hyperedges[sample_ids]  # 获取预存的超图
+            # 创建 PyG 批处理对象
+            data_list = [self.hypergraph_data[i] for i in sample_ids]
+            pyg_hypergraph_batch = Batch.from_data_list(data_list)
+
             if test:
                 return self.candidate_entities[sample_ids], \
                     self.query_entities[sample_ids], \
                     kb_adj_mats, \
-                    batch_hyperedges, \
+                    pyg_hypergraph_batch, \
                     q_input, \
                     seed_dist, \
                     true_batch_id, \
@@ -681,7 +693,7 @@ class SingleDataLoader(BasicDataLoader):
             return self.candidate_entities[sample_ids], \
                 self.query_entities[sample_ids], \
                 kb_adj_mats, \
-                batch_hyperedges, \
+                pyg_hypergraph_batch, \
                 q_input, \
                 seed_dist, \
                 true_batch_id, \

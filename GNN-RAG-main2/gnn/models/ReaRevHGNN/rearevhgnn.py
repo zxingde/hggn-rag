@@ -12,233 +12,108 @@ from modules.question_encoding.bert_encoder import BERTInstruction
 from modules.layer_init import TypeLayer
 from modules.query_update import AttnEncoder, Fusion, QueryReform, DiffusionFusion
 from modules.hypergraph_construction.relation_community_constructor import RelationCommunityConstructor
-from modules.kg_reasoning.hyper_gnn import HyperGNNLayer
+# from modules.kg_reasoning.hyper_gnn import HyperGNNLayer # <--- 删除这一行
+from torch_geometric.nn import MessagePassing # <--- 添加这一行
+from torch_scatter import scatter_mean, scatter_add # <--- 添加这一行
 
 VERY_SMALL_NUMBER = 1e-10
 VERY_NEG_NUMBER = -100000000000
 
 
-class HyperGNNReasoningLayer(nn.Module):
+class PyGHyperGNNReasoningLayer(MessagePassing):
     """
-    封装HGNN推理逻辑的模块，包括动态权重计算和HGNN层。
+    使用 PyG MessagePassing 和 torch_scatter 实现的
+    完全向量化的、带动态权重的超图推理层。
     """
 
-    def __init__(self, args, entity_dim, num_layers, dropout):
-        super(HyperGNNReasoningLayer, self).__init__()
-        self.entity_dim = entity_dim
+    def __init__(self, in_dim, out_dim, num_layers, dropout):
+        super(PyGHyperGNNReasoningLayer, self).__init__(aggr=None)  # 我们手动聚合
+        self.entity_dim = in_dim
+        self.num_layers = num_layers
+        self.dropout = nn.Dropout(p=dropout)
 
-        # 1. 定义HGNN层
-        self.hgnn_layers = nn.ModuleList()
+        # 每一层都有自己的MLP
+        self.node_to_he_mlps = nn.ModuleList()
+        self.he_to_node_mlps = nn.ModuleList()
         for _ in range(num_layers):
-            self.hgnn_layers.append(
-                HyperGNNLayer(in_features=entity_dim,
-                              out_features=entity_dim,
-                              dropout=dropout)
-            )
+            self.node_to_he_mlps.append(nn.Linear(in_dim, out_dim))
+            self.he_to_node_mlps.append(nn.Linear(in_dim, out_dim))
 
-        # 2. 定义动态权重MLP
-        self.hyperedge_weight_mlp = nn.Linear(self.entity_dim * 2, 1)
+        # 动态权重 MLP
+        self.hyperedge_weight_mlp = nn.Linear(in_dim * 2, 1)
 
-    def forward(self, init_entity_emb, current_instructions_avg, batch_hyperedges, max_num_hyperedges, batch_size,
-                device):
-        """
-        init_entity_emb: (B, N, D) - 初始节点嵌入
-        current_instructions_avg: (B, D) - 当前迭代的平均指令
-        batch_hyperedges: list[list[tuple]] - 预先构建的超边
-        """
+    def forward(self, init_entity_emb, current_instructions_avg, pyg_batch):
+        # pyg_batch 包含合并后的图数据
+        # hyperedge_index [2, TotalConnections]: (row 0: node_idx, row 1: he_idx)
+        hyperedge_index = pyg_batch.hyperedge_index
+        # node_batch_ptr [TotalNodes]: [0, 0, ..., 1, 1, ..., B-1, B-1]
+        node_batch_ptr = pyg_batch.batch
 
-        # --- 步骤 5: 动态超边权重计算 ---
-        if max_num_hyperedges > 0:
-            padded_weights = torch.zeros(batch_size, max_num_hyperedges).to(device)
-            for i in range(batch_size):
-                hyperedges = batch_hyperedges[i]
-                if not hyperedges:
-                    continue
+        # 1. 创建超边的批处理指针 (he_batch_ptr)
+        # he_counts_per_graph [B]: [num_he_in_G0, num_he_in_G1, ...]
+        he_counts_per_graph = pyg_batch.num_hyperedges
+        he_batch_ptr = torch.repeat_interleave(
+            torch.arange(len(he_counts_per_graph), device=init_entity_emb.device),
+            repeats=he_counts_per_graph
+        )  # Shape: [TotalHyperedges]
 
-                num_hyperedges = len(hyperedges)
-                # a. 计算超边表示 (使用 初始 节点特征)
-                current_node_embs = init_entity_emb[i]
-                hyperedge_embs = []
-                for h_edge in hyperedges:
-                    valid_indices = [idx for idx in list(h_edge) if idx < current_node_embs.shape[0]]
-                    if not valid_indices:
-                        hyperedge_embs.append(torch.zeros(self.entity_dim).to(device))
-                        continue
-                    nodes_in_edge_embs = current_node_embs[valid_indices, :]
-                    hyperedge_embs.append(torch.mean(nodes_in_edge_embs, dim=0))
+        # 2. 将指令 "分散" (Scatter) 到所有超边
+        # current_instructions_avg [B, D] -> scattered_instructions [TotalHyperedges, D]
+        scattered_instructions = current_instructions_avg[he_batch_ptr]
 
-                if not hyperedge_embs:  # 确保 hyperedge_embs 不为空
-                    continue
+        # --- 开始HGNN多层推理 ---
+        node_features = init_entity_emb  # 始终从初始嵌入开始
+        total_hyperedges = pyg_batch.num_hyperedges.sum()
+        for k in range(self.num_layers):
+            # 3. 步骤 a: 节点 -> 超边 (Node-to-Hyperedge)
+            # 收集所有节点特征，按其所属的超边ID (hyperedge_index[1]) 进行平均
+            he_features = scatter_mean(
+                node_features[hyperedge_index[0]],  # 源: 节点特征
+                hyperedge_index[1],  # 索引: 超边ID
+                dim=0, # 沿着节点维度聚合
+                dim_size = total_hyperedges
+            )  # Shape: [TotalHyperedges, D]
 
-                hyperedge_embs = torch.stack(hyperedge_embs)
+            he_features = self.dropout(F.relu(self.node_to_he_mlps[k](he_features)))
 
-                # b. 计算匹配分数
-                current_instruction = current_instructions_avg[i].unsqueeze(0).expand(num_hyperedges, -1)
-                combined_reps = torch.cat([hyperedge_embs, current_instruction], dim=1)
-                scores = self.hyperedge_weight_mlp(combined_reps).squeeze(-1)
+            # 4. 步骤 b: 计算并应用动态权重
+            combined_reps = torch.cat([he_features, scattered_instructions], dim=1)
+            weights = torch.sigmoid(self.hyperedge_weight_mlp(combined_reps))
+            weighted_he_features = he_features * weights
 
-                # c. 生成权重
-                weights = torch.sigmoid(scores)
-                padded_weights[i, :num_hyperedges] = weights
-            final_hyperedge_weights = padded_weights
-        else:
-            final_hyperedge_weights = None
+            # 5. 步骤 c: 超边 -> 节点 (Hyperedge-to-Node)
+            # 收集所有加权后的超边特征，按其连接的节点ID (hyperedge_index[0]) 进行求和
+            updated_node_features = scatter_add(
+                weighted_he_features[hyperedge_index[1]],  # 源: 加权的超边特征
+                hyperedge_index[0],  # 索引: 节点ID
+                dim=0,  # 沿着超边维度聚合
+                dim_size=node_features.size(0)  # 确保输出张量大小正确
+            )  # Shape: [TotalNodes, D]
 
-        # --- 步骤 6: 加权HGNN推理 ---
-        # 每次都从 初始 实体嵌入开始HNN推理
-        hgnn_entity_emb = init_entity_emb
-        for layer in self.hgnn_layers:
-            hgnn_entity_emb = layer(hgnn_entity_emb, batch_hyperedges, final_hyperedge_weights)
+            updated_node_features = self.dropout(F.relu(self.he_to_node_mlps[k](updated_node_features)))
 
-        return hgnn_entity_emb
+            # 6. 残差连接
+            node_features = node_features + updated_node_features
 
-class ReaRevHGNN(BaseModel):
-    def __init__(self, args, num_entity, num_relation, num_word, relation2id):
-        """
-        初始化 ReaRevHGNN 模型.
-        """
-        super(ReaRevHGNN, self).__init__(args, num_entity, num_relation, num_word)
-        self.norm_rel = args['norm_rel']
-        self.relation2id = relation2id
-        self.layers(args)
-
-        self.loss_type = args['loss_type']
-        self.num_iter = args['num_iter']
-        self.num_ins = args['num_ins']
-        self.num_gnn = args['num_gnn']
-        self.alg = args['alg']
-        assert self.alg == 'bfs'
-        self.lm = args['lm']
-
-        relation_features = self.relation_embedding.weight.clone()
-        self.private_module_def(args, num_entity, num_relation, relation_features)
-
-        self.to(self.device)
-        self.lin = nn.Linear(3 * self.entity_dim, self.entity_dim)
-
-        self.fusion = Fusion(self.entity_dim)
-        self.reforms = []
-        for i in range(self.num_ins):
-            self.add_module('reform' + str(i), QueryReform(self.entity_dim))
-
-    def layers(self, args):
-        # (这部分与之前保持一致)
-        word_dim = self.word_dim
-        kg_dim = self.kg_dim
-        entity_dim = self.entity_dim
-        self.linear_dropout = args['linear_dropout']
-        self.entity_linear = nn.Linear(in_features=self.ent_dim, out_features=entity_dim)
-        self.relation_linear = nn.Linear(in_features=self.rel_dim, out_features=entity_dim)
-        self.linear_drop = nn.Dropout(p=self.linear_dropout)
-
-        if self.encode_type:
-            self.type_layer = TypeLayer(in_features=entity_dim, out_features=entity_dim,
-                                        linear_drop=self.linear_drop, device=self.device, norm_rel=self.norm_rel)
-
-        self.self_att_r = AttnEncoder(self.entity_dim)
-        self.kld_loss = nn.KLDivLoss(reduction='none')
-        self.bce_loss_logits = nn.BCEWithLogitsLoss(reduction='none')
-        self.mse_loss = torch.nn.MSELoss()
-
-        # =================================================================
-        # ================ 2. 替换这个函数 ================================
-        # =================================================================
-    def private_module_def(self, args, num_entity, num_relation, relation_features):
-        """
-        定义模型使用的各个模块.
-        """
-        entity_dim = self.entity_dim
-        # 原始GNN推理模块
-        self.reasoning = ReasonGNNLayer(args, num_entity, num_relation, entity_dim, self.alg)
-
-        # 指令编码器
-        if args['lm'] == 'lstm':
-            self.instruction = LSTMInstruction(args, self.word_embedding, self.num_word)
-            self.relation_linear = nn.Linear(in_features=entity_dim, out_features=entity_dim)
-        else:
-            self.instruction = BERTInstruction(args, self.word_embedding, self.num_word, args['lm'])
-
-        # --- 模块修改与新增 ---
-        # 1. 超图构建器 (使用新的基于关系的构造器)
-        # self.hypergraph_constructor = RelationCommunityConstructor(args, num_entity)
-
-        # 2. HGNN推理模块 (已重构)
-        self.num_hyper_gnn_layers = args.get('num_hyper_gnn_layers', self.num_gnn)
-        self.hgnn_reasoning = HyperGNNReasoningLayer(args,
-                                                     self.entity_dim,
-                                                     self.num_hyper_gnn_layers,
-                                                     self.linear_dropout)
-
-        # 3. GNN-HNN 融合模块 (模块四)
-        self.diffusion_fusion = DiffusionFusion(self.entity_dim)
-
-        # 4. 最终打分层
-        self.final_score_func = nn.Linear(in_features=self.entity_dim, out_features=1)
-
-    # --- 省略 get_ent_init, get_rel_feature, calc_loss_label 等与之前版本一致的辅助函数 ---
-    def init_reason(self, curr_dist, local_entity, kb_adj_mat, q_input, query_entities):
-        self.local_entity = local_entity
-        self.instruction_list, self.attn_list = self.instruction(q_input)
-        rel_features, rel_features_inv = self.get_rel_feature()
-        self.local_entity_emb = self.get_ent_init(local_entity, kb_adj_mat, rel_features)
-        self.init_entity_emb = self.local_entity_emb
-        self.curr_dist = curr_dist
-        self.dist_history = []
-        self.action_probs = []
-        self.seed_entities = curr_dist
-        self.reasoning.init_reason(local_entity=local_entity, kb_adj_mat=kb_adj_mat,
-                                   local_entity_emb=self.local_entity_emb, rel_features=rel_features,
-                                   rel_features_inv=rel_features_inv, query_entities=query_entities)
-
-    def get_ent_init(self, local_entity, kb_adj_mat, rel_features):
-        if self.encode_type:
-            local_entity_emb = self.type_layer(local_entity=local_entity, edge_list=kb_adj_mat,
-                                               rel_features=rel_features)
-        else:
-            local_entity_emb = self.entity_embedding(local_entity)
-            local_entity_emb = self.entity_linear(local_entity_emb)
-        return local_entity_emb
-
-    def get_rel_feature(self):
-        if self.rel_texts is None:
-            rel_features = self.relation_embedding.weight
-            rel_features_inv = self.relation_embedding_inv.weight
-            rel_features = self.relation_linear(rel_features)
-            rel_features_inv = self.relation_linear(rel_features_inv)
-        else:
-            rel_features = self.instruction.question_emb(self.rel_features)
-            rel_features_inv = self.instruction.question_emb(self.rel_features_inv)
-            rel_features = self.self_att_r(rel_features, (self.rel_texts != self.instruction.pad_val).float())
-            rel_features_inv = self.self_att_r(rel_features_inv, (self.rel_texts != self.instruction.pad_val).float())
-            if self.lm == 'lstm':
-                rel_features = self.self_att_r(rel_features, (self.rel_texts != self.num_relation + 1).float())
-                rel_features_inv = self.self_att_r(rel_features_inv,
-                                                   (self.rel_texts_inv != self.num_relation + 1).float())
-        return rel_features, rel_features_inv
-
-    def calc_loss_label(self, curr_dist, teacher_dist, label_valid):
-        tp_loss = self.get_loss(pred_dist=curr_dist, answer_dist=teacher_dist, reduction='none')
-        tp_loss = tp_loss * label_valid
-        cur_loss = torch.sum(tp_loss) / curr_dist.size(0)
-        return cur_loss
+        return node_features
 
 
     def forward(self, batch, training=False):
         """
-        修改后的 Forward 流程: (GNN -> HGNN -> Fusion -> 指令更新) x T次
+        修改后的 Forward 流程: ( 指令更新 -> ( (GNN || HGNN) -> Fusion -> 更新分布 ) x L层 ) x T次
         """
-        # --- 步骤 1: 解包并转换输入数据 ---
-        local_entity, query_entities, kb_adj_mat, batch_hyperedges, query_text, seed_dist, true_batch_id, answer_dist = batch
+        # --- 步骤 1: 解包并转换输入数据 (不变) ---
+        local_entity, query_entities, kb_adj_mat, pyg_hypergraph_batch, query_text, seed_dist, true_batch_id, answer_dist = batch
         local_entity = torch.from_numpy(local_entity).type('torch.LongTensor').to(self.device)
         query_entities = torch.from_numpy(query_entities).type('torch.FloatTensor').to(self.device)
         answer_dist = torch.from_numpy(answer_dist).type('torch.FloatTensor').to(self.device)
         seed_dist = torch.from_numpy(seed_dist).type('torch.FloatTensor').to(self.device)
-        current_dist = Variable(seed_dist, requires_grad=True)
+        initial_dist = Variable(seed_dist, requires_grad=False)  # 初始种子分布
         q_input = torch.from_numpy(query_text).type('torch.LongTensor').to(self.device)
         batch_size = local_entity.size(0)
 
-        # --- 步骤 2: 初始化推理环境 (获取初始指令和嵌入) ---
-        self.init_reason(curr_dist=current_dist, local_entity=local_entity,
+        # --- 步骤 2: 初始化推理环境 (获取初始指令和嵌入) (不变) ---
+        self.init_reason(curr_dist=initial_dist, local_entity=local_entity,
                          kb_adj_mat=kb_adj_mat, q_input=q_input, query_entities=query_entities)
         self.instruction.init_reason(q_input)
         for i in range(self.num_ins):
@@ -246,58 +121,78 @@ class ReaRevHGNN(BaseModel):
             self.instruction.instructions.append(relational_ins.unsqueeze(1))
             self.instruction.relational_ins = relational_ins
 
-        # --- 步骤 3: 超图构建 (在循环外构建一次) ---
-        # batch_hyperedges = self.hypergraph_constructor(kb_adj_mat, local_entity, self.relation2id)
-        max_num_hyperedges = max(len(h) for h in batch_hyperedges) if len(batch_hyperedges) > 0 else 0
+        # --- 步骤 3: 准备 PyG 和格式转换 (不变) ---
+        pyg_hypergraph_batch = pyg_hypergraph_batch.to(self.device)
+        node_mask = (local_entity != self.num_entity)
+        # HGNN 始终使用初始的 Flattened 特征 B 作为节点输入
+        init_entity_emb_flat = self.init_entity_emb[node_mask]
 
-        # --- 步骤 4: 迭代推理 (GNN -> HGNN -> Fusion -> Update) ---
-        gnn_entity_emb = None
-        fused_entity_emb = None  # 存储最后一次迭代的融合嵌入
-        gnn_current_dist = self.curr_dist  # 保持原始的种子分布 (用于GNN)
+        # --- 步骤 4: 迭代推理 ---
+        # current_fused_emb 用于指令更新，在每次 t 循环的 j 循环结束后更新
+        self.current_fused_emb = self.init_entity_emb
+        self.layer_input_dist = self.initial_dist
+        # current_dist 用于 GNN 输入和最终预测，在每次 j 循环内部更新
+        self.current_dist = self.initial_dist
+        self.dist_history = [self.current_dist]  # 记录每次外层迭代 t 结束时的最终分布
 
-        for t in range(self.num_iter):
+        for t in range(self.num_iter):  # 外层循环 T (更新指令)
 
-            # --- 4a: GNN推理 ---
             relation_ins = torch.cat(self.instruction.instructions, dim=1)
-            self.curr_dist = gnn_current_dist  # GNN 每次都从种子分布开始 (ReaRev特性)
-            for j in range(self.num_gnn):
-                self.curr_dist, gnn_entity_emb = self.reasoning(self.curr_dist, relation_ins, step=j)
+            current_instructions_avg = torch.mean(relation_ins, dim=1)  # (B, D) - 用于 HGNN
 
-            # --- 4b: HGNN推理 ---
-            current_instructions_avg = torch.mean(relation_ins, dim=1)  # (B, D)
-            hgnn_entity_emb = self.hgnn_reasoning(self.init_entity_emb,  # HGNN 每次都从初始嵌入开始
-                                                  current_instructions_avg,
-                                                  batch_hyperedges,
-                                                  max_num_hyperedges,
-                                                  batch_size,
-                                                  self.device)
 
-            # --- 4c: 融合 GNN 和 HGNN ---
-            fused_entity_emb = self.diffusion_fusion(gnn_entity_emb, hgnn_entity_emb)
+            for j in range(self.num_gnn):  # 内层循环 L (图卷积层)
 
-            # --- 4d: 指令更新 (使用融合后的特征) ---
-            for j in range(self.num_ins):
-                reform = getattr(self, 'reform' + str(j))
-                q = reform(self.instruction.instructions[j].squeeze(1), fused_entity_emb, query_entities,
-                           (local_entity != self.num_entity).float())
-                self.instruction.instructions[j] = q.unsqueeze(1)
+                # --- 4a: GNN 推理 ---
+                # 输入: 上一层的分布 layer_input_dist
+                # 输出: gnn_dist (本层计算出的分布), gnn_emb (本层更新后的 Padded 特征 A)
+                _, gnn_emb = self.reasoning(self.layer_input_dist, relation_ins, step=j)
 
-        # --- 迭代循环结束 ---
+                # --- 4b: HGNN 推理 ---
+                # 输入: 初始的 Flattened 特征 B, 当前的指令
+                # 输出: hgnn_entity_emb_flat (本层更新后的 Flattened 特征 B)
+                hgnn_entity_emb_flat = self.hgnn_reasoning(self.current_fused_emb,
+                                                           current_instructions_avg,
+                                                           pyg_hypergraph_batch)
+
+                # --- 4c: 转换 HGNN 输出回 Padded 格式 A ---
+                hgnn_entity_emb_padded = torch.zeros_like(self.init_entity_emb)
+                hgnn_entity_emb_padded[node_mask] = hgnn_entity_emb_flat
+
+                # --- 4d: 融合 GNN 和 HGNN 的 *特征* ---
+                self.current_fused_emb = self.diffusion_fusion(gnn_emb, hgnn_entity_emb_padded)
+                # current_fused_emb 是第 j 层融合后的 Padded 特征 A'
+
+                # --- 4e: 使用 *当层融合后* 的特征计算 *下一层* 的分布 (cul 函数) ---
+                layer_scores = self.final_score_func(self.linear_drop(self.current_fused_emb)).squeeze(dim=-1)
+                local_entity_mask = node_mask.float()
+                layer_scores = layer_scores + (1 - local_entity_mask) * VERY_NEG_NUMBER
+                # 更新 layer_input_dist，供下一层 j+1 的 GNN 使用
+                layer_input_dist = F.softmax(layer_scores, dim=1)
+
+            # --- 内层循环 j 结束 ---
+            # 记录这次外层迭代最终的分布 (即最后一层 j 计算出的 layer_input_dist)
+            current_dist = layer_input_dist  # 保存最后一层的分布结果
+            self.dist_history.append(current_dist)
+
+            # --- 4f: 指令更新 (使用最后 L 层融合后的特征 current_fused_emb) ---
+            for j_ins in range(self.num_ins):
+                reform = getattr(self, 'reform' + str(j_ins))
+                q = reform(self.instruction.instructions[j_ins].squeeze(1),self.current_fused_emb, query_entities,
+                           node_mask.float())
+                self.instruction.instructions[j_ins] = q.unsqueeze(1)
+
+        # --- 外层迭代 t 结束 ---
 
         # --- 步骤 5: 最终答案预测 ---
-        # 使用 *最后一次* 迭代产生的融合特征进行预测
-        final_scores = self.final_score_func(self.linear_drop(fused_entity_emb)).squeeze(dim=-1)
+        pred_dist = self.dist_history[-1]  # 使用最后一次迭代 t 的最终分布
 
-        local_entity_mask = (local_entity != self.num_entity).float()
-        final_scores = final_scores + (1 - local_entity_mask) * VERY_NEG_NUMBER
-        pred_dist = F.softmax(final_scores, dim=1)
-
-        # --- 步骤 6: 计算损失并返回 ---
+        # --- 步骤 6: 计算损失并返回 (不变) ---
         answer_number = torch.sum(answer_dist, dim=1, keepdim=True)
         case_valid = (answer_number > 0).float()
         loss = self.calc_loss_label(curr_dist=pred_dist, teacher_dist=answer_dist, label_valid=case_valid)
-
         pred = torch.max(pred_dist, dim=1)[1]
+
         if training:
             h1, f1 = self.get_eval_metric(pred_dist, answer_dist)
             tp_list = [h1.tolist(), f1.tolist()]
