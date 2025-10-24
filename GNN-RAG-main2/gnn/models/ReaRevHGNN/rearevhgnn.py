@@ -5,7 +5,8 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 from models.base_model import BaseModel
-from modules.kg_reasoning.reasongnn import ReasonGNNLayer
+from modules.kg_reasoning.hgnn_reasongnn import ReasonGNNLayer
+from modules.kg_reasoning.pyg_hgnn_layer import PyGWeightedHGNNLayer
 from modules.question_encoding.lstm_encoder import LSTMInstruction
 from modules.question_encoding.bert_encoder import BERTInstruction
 from modules.layer_init import TypeLayer
@@ -126,7 +127,7 @@ class ReaRev(BaseModel):
         # self.relation_linear = nn.Linear(in_features=entity_dim, out_features=entity_dim)
         # self.relation_linear_inv = nn.Linear(in_features=entity_dim, out_features=entity_dim)
 
-    def init_reason(self, curr_dist, local_entity, kb_adj_mat, q_input, query_entities):
+    def init_reason(self, curr_dist, local_entity, kb_adj_mat, q_input, query_entities,pyg_hypergraph_batch=None, node_mask=None):
         """
         Initializing Reasoning
         """
@@ -145,10 +146,16 @@ class ReaRev(BaseModel):
         self.reasoning.init_reason(
             local_entity=local_entity,
             kb_adj_mat=kb_adj_mat,
-            local_entity_emb=self.local_entity_emb,
+            local_entity_emb=self.local_entity_emb,  # 传递 GNN 自己的初始嵌入 (Padded A)
             rel_features=rel_features,
             rel_features_inv=rel_features_inv,
-            query_entities=query_entities)
+            query_entities=query_entities,
+            # --- 新增传递的参数 ---
+            pyg_hypergraph_batch=pyg_hypergraph_batch,  # 传递 PyG 对象
+            node_mask=node_mask,  # 传递布尔 Mask
+            init_entity_emb=self.init_entity_emb  # 传递最原始的 Padded 嵌入 A
+            # --- 结束新增 ---
+        )
 
     def calc_loss_label(self, curr_dist, teacher_dist, label_valid):
         tp_loss = self.get_loss(pred_dist=curr_dist, answer_dist=teacher_dist, reduction='none')
@@ -160,17 +167,18 @@ class ReaRev(BaseModel):
         """
         Forward function: creates instructions and performs GNN reasoning.
         """
-
-        # local_entity, query_entities, kb_adj_mat, query_text, seed_dist, answer_dist = batch
-        local_entity, query_entities, kb_adj_mat, query_text, seed_dist, true_batch_id, answer_dist = batch
+        local_entity, query_entities, kb_adj_mat, pyg_hypergraph_batch, query_text, seed_dist, true_batch_id, answer_dist = batch
         local_entity = torch.from_numpy(local_entity).type('torch.LongTensor').to(self.device)
-        # local_entity_mask = (local_entity != self.num_entity).float()
         query_entities = torch.from_numpy(query_entities).type('torch.FloatTensor').to(self.device)
         answer_dist = torch.from_numpy(answer_dist).type('torch.FloatTensor').to(self.device)
         seed_dist = torch.from_numpy(seed_dist).type('torch.FloatTensor').to(self.device)
+        initial_dist = Variable(seed_dist, requires_grad=False)  # 初始种子分布
+        q_input = torch.from_numpy(query_text).type('torch.LongTensor').to(self.device)
+        batch_size = local_entity.size(0)
+
         current_dist = Variable(seed_dist, requires_grad=True)
 
-        q_input = torch.from_numpy(query_text).type('torch.LongTensor').to(self.device)
+        # q_input = torch.from_numpy(query_text).type('torch.LongTensor').to(self.device)
         # query_text2 = torch.from_numpy(query_text2).type('torch.LongTensor').to(self.device)
         if self.lm != 'lstm':
             pad_val = self.instruction.pad_val  # tokenizer.convert_tokens_to_ids(self.instruction.tokenizer.pad_token)
@@ -182,8 +190,12 @@ class ReaRev(BaseModel):
         """
         Instruction generations
         """
+        node_mask = (local_entity != self.num_entity)
         self.init_reason(curr_dist=current_dist, local_entity=local_entity,
-                         kb_adj_mat=kb_adj_mat, q_input=q_input, query_entities=query_entities)
+                         kb_adj_mat=kb_adj_mat, q_input=q_input, query_entities=query_entities,
+                         pyg_hypergraph_batch = pyg_hypergraph_batch,
+                         node_mask = node_mask
+                         )
         self.instruction.init_reason(q_input)
         for i in range(self.num_ins):
             relational_ins, attn_weight = self.instruction.get_instruction(self.instruction.relational_ins, step=i)
