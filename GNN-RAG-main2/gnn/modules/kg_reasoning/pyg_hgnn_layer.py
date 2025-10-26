@@ -38,109 +38,105 @@ class PyGWeightedHGNNLayer(MessagePassing):
         he_counts_per_graph = pyg_batch.num_hyperedges  # [B]
         total_hyperedges = pyg_batch.num_hyperedges.sum().item()
 
-        # 安全检查: 如果没有超边或连接，直接返回初始特征
-        if total_hyperedges == 0 or hyperedge_index.numel() == 0:
-            # print("No hyperedges found, returning initial features.") # (调试时可以取消注释)
+        # 安全检查
+        if total_hyperedges == 0 or pyg_batch.hyperedge_index.numel() == 0:
             return init_node_features_flat
 
-        # --- 1. 计算全局超边索引 global_he_idx ---
-        he_offsets = torch.cat([
-            torch.tensor([0], device=he_counts_per_graph.device),
-            torch.cumsum(he_counts_per_graph, dim=0)[:-1]
-        ])
-        # 确定每个连接(边)属于哪个图
-        connection_batch_ptr = node_batch_ptr[hyperedge_index[0]]
-        # 计算全局索引
-        global_he_idx = hyperedge_index[1] + he_offsets[connection_batch_ptr]
-        # --- 结束计算全局索引 ---
+        # --- MODIFICATION START ---
+        # --- 1. 直接使用 PyG Batching 后的索引 ---
+        node_indices = pyg_batch.hyperedge_index[0]  # 全局节点索引 (已被 PyG 处理)
+        hyperedge_target_indices = pyg_batch.hyperedge_index[1]  # <--- 假设这是 PyG 处理后的全局超边索引
+
+        # --- （关键）运行时检查：确保 hyperedge_target_indices 在 [0, total_hyperedges - 1] 范围内 ---
+        max_target_idx = hyperedge_target_indices.max().item()
+        min_target_idx = hyperedge_target_indices.min().item()
+        if min_target_idx < 0 or max_target_idx >= total_hyperedges:
+            raise IndexError(
+                f"HGNN Error: PyG's hyperedge_index[1] (min={min_target_idx}, max={max_target_idx}) "
+                f"is out of bounds for total_hyperedges ({total_hyperedges}). Data loading is flawed."
+            )
+        # --- 检查结束 ---
+        # --- MODIFICATION END ---
 
         # --- 2. 分散指令到超边 ---
+        # 我们需要知道每个 *全局* 超边属于哪个图 (0..B-1)
+        # `he_batch_ptr` 的原始计算是正确的，它的大小是 total_hyperedges
         he_batch_ptr = torch.repeat_interleave(
             torch.arange(len(he_counts_per_graph), device=init_node_features_flat.device),
             repeats=he_counts_per_graph
         )
-        # 确保 he_batch_ptr 的长度与 total_hyperedges 匹配 (可能在空图时出错)
-        if len(he_batch_ptr) != total_hyperedges:
-            print(
-                f"警告: he_batch_ptr 长度 ({len(he_batch_ptr)}) 与 total_hyperedges ({total_hyperedges}) 不匹配。检查 he_counts_per_graph。")
-            # 可能需要更复杂的处理来跳过没有超边的图的指令
-            # 暂时假设不会发生或影响不大
-            if len(he_batch_ptr) > total_hyperedges:
-                he_batch_ptr = he_batch_ptr[:total_hyperedges]  # 尝试截断
-            # 如果更短，问题更严重，暂时忽略
+        if len(he_batch_ptr) != total_hyperedges:  # 保持长度检查
+            print(f"Warning: he_batch_ptr length ({len(he_batch_ptr)}) != total_hyperedges ({total_hyperedges}).")
+            if len(he_batch_ptr) > total_hyperedges: he_batch_ptr = he_batch_ptr[:total_hyperedges]
 
-        # 检查 current_instructions_avg 的维度是否足够
-        if current_instructions_avg.shape[0] < (he_batch_ptr.max().item() + 1):
+        # 分散指令 (检查索引范围)
+        max_batch_id_needed = he_batch_ptr.max().item() if total_hyperedges > 0 else -1
+        if max_batch_id_needed >= current_instructions_avg.shape[0]:
             raise IndexError(
-                f"指令索引 ({he_batch_ptr.max().item()}) 超出了指令张量维度 ({current_instructions_avg.shape[0]})")
+                f"Instruction index ({max_batch_id_needed}) out of bounds ({current_instructions_avg.shape[0]})")
 
-        scattered_instructions = current_instructions_avg[he_batch_ptr]
-        # --- 结束分散指令 ---
+        if total_hyperedges > 0:
+            scattered_instructions = current_instructions_avg[he_batch_ptr]  # Shape: [total_hyperedges, D_ins]
+        else:
+            scattered_instructions = torch.empty((0, current_instructions_avg.shape[1]),
+                                                 device=current_instructions_avg.device,
+                                                 dtype=current_instructions_avg.dtype)
+        # --- 指令分散结束 ---
 
         # --- 3. 开始 HGNN 多层推理 ---
-        node_features = init_node_features_flat  # 始终从初始嵌入开始
+        node_features = init_node_features_flat
 
         for k in range(self.num_layers):
-            # a. 节点 -> 超边聚合 (聚合得到 he_features_aggregated)
-            # 安全检查: 确保 hyperedge_index[0] 不会超出 node_features 的边界
-            max_node_idx_in_he = hyperedge_index[0].max()
+            # a. Node -> Hyperedge aggregation
+            max_node_idx_in_he = node_indices.max()
             if max_node_idx_in_he >= node_features.shape[0]:
                 raise IndexError(
-                    f"HGNN Error (Layer {k}): node index in hyperedge_index ({max_node_idx_in_he}) is out of bounds for node_features dimension 0 ({node_features.shape[0]}).")
+                    f"HGNN Error (Layer {k}): node index in hyperedge_index[0] ({max_node_idx_in_he}) >= node_features dim 0 ({node_features.shape[0]}).")
 
+            # ---> 使用 PyG 的 hyperedge_target_indices 进行聚合 <---
             he_features_aggregated = scatter_mean(
-                node_features[hyperedge_index[0]],  # 源: 节点特征
-                global_he_idx,  # 索引: 全局超边 ID
+                node_features[node_indices],  # 源: 节点特征 [num_connections, D]
+                hyperedge_target_indices,  # 索引: PyG 处理后的全局超边索引 [num_connections]
                 dim=0,
                 dim_size=total_hyperedges  # 输出大小: 全局超边数
-            )
-            # 应用 MLP
+            )  # 输出 Shape: [total_hyperedges, D]
+
             he_features_mlp = self.dropout(F.relu(self.node_to_he_mlps[k](he_features_aggregated)))
 
-            # b. 计算动态权重 (使用聚合后的 he_features_aggregated)
-            # 检查维度是否匹配
+            # b. Calculate dynamic weights (逻辑不变)
+            # (维度检查和处理保持不变)
             if he_features_aggregated.shape[0] != scattered_instructions.shape[0]:
-                # 处理可能的维度不匹配问题 (之前已经有初步处理)
+                # ... (之前的 padding/truncating 逻辑) ...
                 if he_features_aggregated.shape[0] < scattered_instructions.shape[0]:
                     padding_size = scattered_instructions.shape[0] - he_features_aggregated.shape[0]
                     padding = torch.zeros(padding_size, he_features_aggregated.shape[1],
                                           device=he_features_aggregated.device, dtype=he_features_aggregated.dtype)
                     he_features_aggregated_padded = torch.cat([he_features_aggregated, padding], dim=0)
-                    print(f"Warning: Padded he_features_aggregated in weight calculation (Layer {k})")
-                else:  # he_features_aggregated 更长，通常不应该发生
+                else:
                     he_features_aggregated_padded = he_features_aggregated[:scattered_instructions.shape[0]]
-                    print(f"Warning: Truncated he_features_aggregated in weight calculation (Layer {k})")
-
                 combined_reps = torch.cat([he_features_aggregated_padded, scattered_instructions], dim=1)
             else:
                 combined_reps = torch.cat([he_features_aggregated, scattered_instructions], dim=1)
+            weights = torch.sigmoid(self.hyperedge_weight_mlp(combined_reps))  # Shape: [total_hyperedges, 1]
 
-            weights = torch.sigmoid(self.hyperedge_weight_mlp(combined_reps))
+            # c. Apply weights
+            weighted_he_features = he_features_mlp * weights  # Shape: [total_hyperedges, D]
 
-            # c. 应用权重到 MLP 处理后的特征上
-            weighted_he_features = he_features_mlp * weights
-
-            # d. 超边 -> 节点聚合 (聚合加权后的 weighted_he_features)
-            # 安全检查: 确保 global_he_idx 不会超出 weighted_he_features 的边界
-            max_global_he_idx = global_he_idx.max()
-            if max_global_he_idx >= total_hyperedges:
-                raise IndexError(
-                    f"HGNN Error (Layer {k}): global_he_idx ({max_global_he_idx}) >= total_hyperedges ({total_hyperedges}) for scatter_add source.")
-
-            source_features = weighted_he_features[global_he_idx]
+            # d. Hyperedge -> Node aggregation
+            # ---> 使用 PyG 的 hyperedge_target_indices 作为源索引 <---
+            # 从加权后的全局超边特征中，根据连接关系取出对应的特征
+            source_features = weighted_he_features[hyperedge_target_indices]  # Shape: [num_connections, D]
 
             updated_node_features = scatter_add(
-                source_features,
-                hyperedge_index[0],  # 索引: 全局节点 ID
+                source_features,  # 源: 连接对应的超边特征
+                node_indices,  # 索引: 目标节点索引
                 dim=0,
                 dim_size=node_features.size(0)  # 输出大小: 全局节点数
-            )
-            # 应用 MLP
+            )  # 输出 Shape: [total_nodes, D]
             updated_node_features = self.dropout(F.relu(self.he_to_node_mlps[k](updated_node_features)))
 
-            # e. 残差连接
+            # e. Residual connection
             node_features = node_features + updated_node_features
-        # --- HGNN 多层推理结束 ---
+        # --- HGNN end ---
 
-        # print(f"Finished PyGWeightedHGNNLayer forward pass. Output shape: {node_features.shape}") # (调试时可以取消注释)
-        return node_features  # 返回最终更新的 Flattened 特征 B
+        return node_features

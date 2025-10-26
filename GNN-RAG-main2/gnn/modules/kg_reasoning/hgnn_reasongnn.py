@@ -23,12 +23,11 @@ class ReasonGNNLayer(BaseGNNLayer):
         self.alg = alg
         self.num_ins = args['num_ins']
         self.num_gnn = args['num_gnn']
-        
+
         self.use_posemb = args['pos_emb']
 
         self.hgnn_reasoning = hgnn_module
         self.diffusion_fusion = fusion_module
-
 
         self.init_layers(args)
 
@@ -37,19 +36,21 @@ class ReasonGNNLayer(BaseGNNLayer):
         self.softmax_d1 = nn.Softmax(dim=1)
         self.score_func = nn.Linear(in_features=entity_dim, out_features=1)
         self.glob_lin = nn.Linear(in_features=entity_dim, out_features=entity_dim)
-        self.lin = nn.Linear(in_features=2*entity_dim, out_features=entity_dim)
+        self.lin = nn.Linear(in_features=2 * entity_dim, out_features=entity_dim)
         assert self.alg == 'bfs'
         self.linear_dropout = args['linear_dropout']
         self.linear_drop = nn.Dropout(p=self.linear_dropout)
         for i in range(self.num_gnn):
             self.add_module('rel_linear' + str(i), nn.Linear(in_features=entity_dim, out_features=entity_dim))
             if self.alg == 'bfs':
-                self.add_module('e2e_linear' + str(i), nn.Linear(in_features=2*(self.num_ins)*entity_dim + entity_dim, out_features=entity_dim))
+                self.add_module('e2e_linear' + str(i),
+                                nn.Linear(in_features=2 * (self.num_ins) * entity_dim + entity_dim,
+                                          out_features=entity_dim))
 
             if self.use_posemb:
                 self.add_module('pos_emb' + str(i), nn.Embedding(self.num_relation, entity_dim))
                 self.add_module('pos_emb_inv' + str(i), nn.Embedding(self.num_relation, entity_dim))
-        self.lin_m =  nn.Linear(in_features=(self.num_ins)*entity_dim, out_features=entity_dim)
+        self.lin_m = nn.Linear(in_features=(self.num_ins) * entity_dim, out_features=entity_dim)
 
     def init_reason(self, local_entity, kb_adj_mat, local_entity_emb, rel_features, rel_features_inv, query_entities,
                     # --- 新增参数 ---
@@ -57,7 +58,10 @@ class ReasonGNNLayer(BaseGNNLayer):
                     node_mask=None,
                     init_entity_emb=None  # 传入最原始的 Padded 嵌入 A
                     # --- 结束新增 ---
-                    ,query_node_emb=None):
+                    , query_node_emb=None):
+
+        # (我们之前用于测试的 raise Exception 已经删除)
+
         batch_size, max_local_entity = local_entity.size()
         self.local_entity_mask = (local_entity != self.num_entity).float()
         self.batch_size = batch_size
@@ -76,17 +80,42 @@ class ReasonGNNLayer(BaseGNNLayer):
 
         # 计算并存储 HGNN 需要的 Flattened 初始节点嵌入 B
         # 使用传入的、固定的初始嵌入 init_entity_emb (Padded A) 来计算
-        if init_entity_emb is not None and self.node_mask is not None:
-            self.init_entity_emb_flat = init_entity_emb[self.node_mask]  # Padded A -> Flattened B
-        else:
-            print("警告/错误: init_entity_emb 或 node_mask 未提供给 ReasonGNNLayer.init_reason")
-            # 尝试从 local_entity_emb (假设它是初始嵌入) 计算，作为后备
-            if local_entity_emb is not None and self.node_mask is not None:
-                print("尝试使用传入的 local_entity_emb 计算 init_entity_emb_flat")
-                self.init_entity_emb_flat = local_entity_emb[self.node_mask]
-            else:
-                self.init_entity_emb_flat = None  # HGNN 将无法运行
-       
+        if init_entity_emb is not None and self.pyg_hypergraph_batch is not None:
+            # --- 修正开始 ---
+            #
+            # 错误原因:
+            # self.init_entity_emb_flat = init_entity_emb[self.node_mask] (原代码)
+            # 这种方法创建了一个 (num_real_nodes, D) 的张量 (例如大小 11785)。
+            #
+            # 但 pyg_batch (及其 hyperedge_index) 是基于 len(g2l) 构建的，
+            # g2l 可能包含 padding 实体，因此 pyg_batch.num_nodes (例如 11793)
+            # > num_real_nodes (11785)。
+            # hyperedge_index 包含的索引 (如 11792) 超出了 11785 的范围。
+            #
+            # 修正:
+            # 我们必须构建一个 (pyg_batch.num_nodes, D) 的张量 (大小 11793, 50)。
+            # 我们通过拼接 Padded A (init_entity_emb) 中每个图的 *实际* (g2l) 切片来做到这一点。
+
+            # 1. 获取每个图的实际节点数 (来自 pyg_batch)
+            # ptr (指针) 形状 (B+1,), 例如 [0, 1500, 2800, ..., 11793]
+            ptr = self.pyg_hypergraph_batch.ptr
+
+            # 2. 从 Padded A (B, N_max, D) 中提取切片并拼接
+            feature_slices = []
+            for i in range(self.batch_size):
+                num_nodes_in_this_graph = ptr[i + 1] - ptr[i]  # 计算第 i 个图的节点数
+                # 从 (8, 2000, 50) 中切片 [i, :num_nodes, :]
+                feature_slices.append(init_entity_emb[i, :num_nodes_in_this_graph, :])
+
+            # 3. 拼接成 (11793, 50) 的张量
+            self.init_entity_emb_flat = torch.cat(feature_slices, dim=0)
+
+            # (可选) 安全检查
+            if self.init_entity_emb_flat.shape[0] != self.pyg_hypergraph_batch.num_nodes:
+                print(
+                    f"警告: 节点特征张量维度 ({self.init_entity_emb_flat.shape[0]}) 与 pyg_batch.num_nodes ({self.pyg_hypergraph_batch.num_nodes}) 不匹配！")
+
+            # --- 修正结束 ---
 
     def reason_layer(self, curr_dist, instruction, rel_linear, pos_emb):
         """
@@ -96,26 +125,25 @@ class ReasonGNNLayer(BaseGNNLayer):
         max_local_entity = self.max_local_entity
         # num_relation = self.num_relation
         rel_features = self.rel_features
-        
-        
+
         fact_rel = torch.index_select(rel_features, dim=0, index=self.batch_rels)
-        
+
         fact_query = torch.index_select(instruction, dim=0, index=self.batch_ids)
         if pos_emb is not None:
             pe = pos_emb(self.batch_rels)
             # fact_rel = torch.cat([fact_rel, pe], 1)
-            fact_val = F.relu((rel_linear(fact_rel)+pe) * fact_query)
-        else :
+            fact_val = F.relu((rel_linear(fact_rel) + pe) * fact_query)
+        else:
             fact_val = F.relu(rel_linear(fact_rel) * fact_query)
         fact_prior = torch.sparse.mm(self.head2fact_mat, curr_dist.view(-1, 1))
 
         fact_val = fact_val * fact_prior
-        
+
         f2e_emb = torch.sparse.mm(self.fact2tail_mat, fact_val)
         assert not torch.isnan(f2e_emb).any()
 
         neighbor_rep = f2e_emb.view(batch_size, max_local_entity, self.entity_dim)
-        
+
         return neighbor_rep
 
     def reason_layer_inv(self, curr_dist, instruction, rel_linear, pos_emb_inv):
@@ -123,18 +151,17 @@ class ReasonGNNLayer(BaseGNNLayer):
         max_local_entity = self.max_local_entity
         # num_relation = self.num_relation
         rel_features = self.rel_features_inv
-        
+
         fact_rel = torch.index_select(rel_features, dim=0, index=self.batch_rels)
-        
+
         fact_query = torch.index_select(instruction, dim=0, index=self.batch_ids)
         if pos_emb_inv is not None:
             pe = pos_emb_inv(self.batch_rels)
             # fact_rel = torch.cat([fact_rel, pe], 1)
-            fact_val = F.relu((rel_linear(fact_rel)+pe) * fact_query)
-        else :
+            fact_val = F.relu((rel_linear(fact_rel) + pe) * fact_query)
+        else:
             fact_val = F.relu(rel_linear(fact_rel) * fact_query)
         fact_prior = torch.sparse.mm(self.tail2fact_mat, curr_dist.view(-1, 1))
-        
 
         fact_val = fact_val * fact_prior
 
@@ -142,10 +169,10 @@ class ReasonGNNLayer(BaseGNNLayer):
         assert not torch.isnan(f2e_emb).any()
 
         neighbor_rep = f2e_emb.view(batch_size, max_local_entity, self.entity_dim)
-        
+
         return neighbor_rep
 
-    def combine(self,emb):
+    def combine(self, emb):
         """
         Combines instruction-specific representations.
         """
@@ -153,7 +180,7 @@ class ReasonGNNLayer(BaseGNNLayer):
         local_emb = F.relu(self.lin_m(local_emb))
 
         score_func = self.score_func
-        
+
         score_tp = score_func(self.linear_drop(local_emb)).squeeze(dim=2)
         answer_mask = self.local_entity_mask
         self.possible_cand.append(answer_mask)
@@ -198,27 +225,27 @@ class ReasonGNNLayer(BaseGNNLayer):
         # print(f"  GNN emb shape: {gnn_emb.shape}") # 调试信息
 
         # --- 2. HGNN 部分 (计算 HGNN 更新后的特征 hgnn_entity_emb_padded) ---
-        hgnn_entity_emb_padded = torch.zeros_like(gnn_emb)  # 初始化为零 Padded 张量 A
+        hgnn_entity_emb_padded = torch.zeros_like(gnn_emb)  # 初始化为零 Padded 张量 A (8, 2000, 50)
         if self.hgnn_reasoning is not None and self.init_entity_emb_flat is not None:
             current_instructions_avg = torch.mean(relational_ins, dim=1)  # HGNN 需要当前指令
             try:
-                # 输入: 初始 Flattened 特征 B, 当前指令
+                # 输入: 初始 Flattened 特征 B (11793, 50), 当前指令
                 hgnn_entity_emb_flat = self.hgnn_reasoning(self.init_entity_emb_flat,
                                                            current_instructions_avg,
                                                            self.pyg_hypergraph_batch)
                 # 输出: hgnn_entity_emb_flat (Flattened 特征 B)
                 # print(f"  HGNN emb_flat shape: {hgnn_entity_emb_flat.shape}") # 调试信息
 
-                # 转换回 Padded 格式 A
-                if self.node_mask is not None:
-                    # 安全检查: 确保维度匹配
-                    if hgnn_entity_emb_flat.shape[0] == self.node_mask.sum():
-                        hgnn_entity_emb_padded[self.node_mask] = hgnn_entity_emb_flat
-                    else:
-                        print(
-                            f"警告 (step {step}): HGNN 输出维度 ({hgnn_entity_emb_flat.shape[0]}) 与 Mask 维度 ({self.node_mask.sum()}) 不匹配！跳过填充。")
-                else:
-                    print(f"警告 (step {step}): Node mask 缺失，无法转换 HGNN 输出为 Padded 格式。")
+                # --- 修正开始：将 (11793, 50) 转换回 Padded 格式 (8, 2000, 50) ---
+                ptr = self.pyg_hypergraph_batch.ptr
+                for i in range(self.batch_size):
+                    # 计算第 i 个图的节点数
+                    num_nodes_in_this_graph = ptr[i + 1] - ptr[i]
+                    # 从 (11793, 50) 中切片 [ptr[i]:ptr[i+1], :]
+                    flat_slice = hgnn_entity_emb_flat[ptr[i]:ptr[i + 1], :]
+                    # 赋值回 (8, 2000, 50) 的 Padded 张量
+                    hgnn_entity_emb_padded[i, :num_nodes_in_this_graph, :] = flat_slice
+                # --- 修正结束 ---
 
             except Exception as e:
                 print(f"错误发生在 HGNN 推理或格式转换 (step {step}): {e}")
@@ -246,5 +273,3 @@ class ReasonGNNLayer(BaseGNNLayer):
         # 返回下一层需要的分布，以及当前层融合后的特征 (用于外部的指令更新)
         # return_score 参数不再需要，因为分布总是在内部计算
         return next_layer_dist, fused_emb
-
-

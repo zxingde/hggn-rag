@@ -9,6 +9,7 @@ from modules.kg_reasoning.hgnn_reasongnn import ReasonGNNLayer
 from modules.kg_reasoning.pyg_hgnn_layer import PyGWeightedHGNNLayer
 from modules.question_encoding.lstm_encoder import LSTMInstruction
 from modules.question_encoding.bert_encoder import BERTInstruction
+from modules.query_update import AttnEncoder, Fusion, QueryReform, DiffusionFusion
 from modules.layer_init import TypeLayer
 from modules.query_update import AttnEncoder, Fusion, QueryReform
 
@@ -16,12 +17,12 @@ VERY_SMALL_NUMBER = 1e-10
 VERY_NEG_NUMBER = -100000000000
 
 
-class ReaRev(BaseModel):
+class ReaRevHGNN(BaseModel):
     def __init__(self, args, num_entity, num_relation, num_word):
         """
         Init ReaRev model.
         """
-        super(ReaRev, self).__init__(args, num_entity, num_relation, num_word)
+        super(ReaRevHGNN, self).__init__(args, num_entity, num_relation, num_word)
         # self.embedding_def()
         # self.share_module_def()
         self.norm_rel = args['norm_rel']
@@ -117,7 +118,21 @@ class ReaRev(BaseModel):
         word_dim = self.word_dim
         kg_dim = self.kg_dim
         entity_dim = self.entity_dim
-        self.reasoning = ReasonGNNLayer(args, num_entity, num_relation, entity_dim, self.alg)
+        num_hyper_gnn_layers = args.get('num_hyper_gnn_layers', 3)
+        hgnn_module = PyGWeightedHGNNLayer(
+            in_dim=entity_dim,
+            out_dim=entity_dim,
+            num_layers=num_hyper_gnn_layers,
+            dropout=self.linear_dropout,  # 复用 GNN 的 dropout
+            instruction_dim=entity_dim
+        )
+
+        fusion_module = DiffusionFusion(d_hid=entity_dim)
+        self.reasoning = ReasonGNNLayer(
+            args, num_entity, num_relation, entity_dim, self.alg,
+            hgnn_module=hgnn_module,
+            fusion_module=fusion_module
+        )
         if args['lm'] == 'lstm':
             self.instruction = LSTMInstruction(args, self.word_embedding, self.num_word)
             self.relation_linear = nn.Linear(in_features=entity_dim, out_features=entity_dim)
@@ -174,6 +189,7 @@ class ReaRev(BaseModel):
         seed_dist = torch.from_numpy(seed_dist).type('torch.FloatTensor').to(self.device)
         initial_dist = Variable(seed_dist, requires_grad=False)  # 初始种子分布
         q_input = torch.from_numpy(query_text).type('torch.LongTensor').to(self.device)
+        pyg_hypergraph_batch = pyg_hypergraph_batch.to(self.device)
         batch_size = local_entity.size(0)
 
         current_dist = Variable(seed_dist, requires_grad=True)
