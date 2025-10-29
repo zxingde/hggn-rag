@@ -49,8 +49,6 @@ class BasicDataLoader(object):
 
         with open(data_file) as f_in:
             for line in tqdm(f_in):
-                if index >= 10:  # 调试代码：硬限制为10条
-                    break
                 if index == config['max_train'] and data_type == "train": break  #break if we reach max_question_size
                 line = json.loads(line)
                 
@@ -677,7 +675,71 @@ class SingleDataLoader(BasicDataLoader):
         if self.model_name == 'ReaRevHGNN':
             # 创建 PyG 批处理对象
             data_list = [self.hypergraph_data[i] for i in sample_ids]
+
+            # ---!!! 添加检查：在 Batching 前确认 data_list 中 hyperedge_index[1] 的最大值 !!!---
+            max_local_idx_before_batch = -1
+            for d in data_list:
+                if d.hyperedge_index.numel() > 0:
+                    max_local_idx_before_batch = max(max_local_idx_before_batch, d.hyperedge_index[1].max().item())
+            # print(f"DEBUG: Max local he_idx in data_list BEFORE batching: {max_local_idx_before_batch}") # 可选调试信息
+            # ---!!! 检查结束 !!!---
+
+            # --- 调用可能有问题的 Batch.from_data_list ---
             pyg_hypergraph_batch = Batch.from_data_list(data_list)
+            # --- 调用结束 ---
+
+            # ---!!! 添加手动计算正确的全局超边索引的逻辑 !!!---
+            # 检查必要的属性是否存在
+            if hasattr(pyg_hypergraph_batch, 'num_hyperedges') and \
+                    hasattr(pyg_hypergraph_batch, 'hyperedge_index') and \
+                    hasattr(pyg_hypergraph_batch, 'batch') and \
+                    pyg_hypergraph_batch.hyperedge_index.numel() > 0:  # 确保 hyperedge_index 不为空
+
+                he_counts_per_graph = pyg_hypergraph_batch.num_hyperedges  # [B]
+                total_hyperedges = he_counts_per_graph.sum().item()  # int
+
+                # 1. 计算超边偏移量 (与 pyg_hgnn_layer.py 中的逻辑相同)
+                he_offsets = torch.cat([
+                    torch.tensor([0], device=he_counts_per_graph.device),
+                    torch.cumsum(he_counts_per_graph, dim=0)[:-1]  # [0, n0, n0+n1, ...] Shape: [B]
+                ])
+
+                # 2. 确定每个连接属于哪个图 (与 pyg_hgnn_layer.py 中的逻辑相同)
+                node_indices = pyg_hypergraph_batch.hyperedge_index[0]  # 全局节点索引
+                node_batch_ptr = pyg_hypergraph_batch.batch  # 节点所属图 batch vector
+                connection_batch_ptr = node_batch_ptr[node_indices]  # 连接所属图 batch vector
+
+                # ---!!! 关键：获取原始的本地超边索引 !!!---
+                # 我们需要一种方法来获取 Batch.from_data_list 处理之前的、正确的本地超边索引。
+                # 最直接的方法是重新从 data_list 构造它。
+                original_local_he_indices = torch.cat(
+                    [d.hyperedge_index[1] for d in data_list if d.hyperedge_index.numel() > 0], dim=0)
+                # ---!!! ---
+
+                # 3. 手动计算正确的全局超边索引
+                correct_global_he_idx = original_local_he_indices + he_offsets[connection_batch_ptr]
+
+                # 4. (重要验证) 检查计算结果是否在预期范围内
+                max_calculated_idx = correct_global_he_idx.max().item()
+                min_calculated_idx = correct_global_he_idx.min().item()
+                if min_calculated_idx < 0 or max_calculated_idx >= total_hyperedges:
+                    print(
+                        f"!!! 严重错误 (get_batch): 手动计算的 global_he_idx (min={min_calculated_idx}, max={max_calculated_idx}) "
+                        f"超出了范围 [0, {total_hyperedges - 1}]。原始数据或拼接逻辑可能仍有问题。")
+                    # 可以选择在这里抛出错误或设置一个标志
+                    # 为了继续运行，暂时将错误的 Batch 对象原样返回，下游会报错
+                else:
+                    # 5. 将计算得到的正确索引存储到 Batch 对象的新属性中
+                    pyg_hypergraph_batch.global_he_idx = correct_global_he_idx
+                    # print(f"DEBUG: Manually calculated global_he_idx added. Max={max_calculated_idx}, TotalHE={total_hyperedges}") # 可选
+
+            else:
+                # 如果缺少必要属性或 hyperedge_index 为空，无法计算，添加一个空的占位符
+                print("警告 (get_batch): 缺少必要属性或超图连接为空，无法计算 global_he_idx。")
+                pyg_hypergraph_batch.global_he_idx = torch.tensor([], dtype=torch.long,
+                                                                  device=pyg_hypergraph_batch.batch.device)
+
+            # ---!!! 手动计算结束 !!!---
 
             if test:
                 return self.candidate_entities[sample_ids], \
