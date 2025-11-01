@@ -1,0 +1,13 @@
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+logs/
+*.tmp
+*.swp
+*.swo
+./GNN-RAG-main2/gnn/checkpoint
+./GNN-RAG-main2/gnn/data
+__pycache__
+./GNN-RAG-main2/gnn/data/sbert
+./GNN-RAG-main2/llm
