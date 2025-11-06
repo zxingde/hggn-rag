@@ -12,7 +12,7 @@ from tqdm import tqdm
 tqdm.monitor_iterval = 0
 
 
-
+from models.ReaRevHGNN.rearevhgnn import ReaRevHGNN
 #from dataset_load_paths import load_data
 from dataset_load import load_data
 from dataset_load_graft import load_data_graft
@@ -38,6 +38,7 @@ class Trainer_KBQA(object):
         self.device = torch.device('cuda' if args['use_cuda'] else 'cpu')
         self.reset_time = 0
         self.load_data(args, args['lm'])
+        self.history = []
         
 
 
@@ -55,6 +56,9 @@ class Trainer_KBQA(object):
         elif model_name == 'GraftNet':
             self.model = GraftNet(self.args,  len(self.entity2id), self.num_kb_relation,
                                   self.num_word)
+        elif model_name == 'ReaRevHGNN':
+            self.model = ReaRevHGNN(self.args, len(self.entity2id), self.num_kb_relation,
+                                    self.num_word)
         # elif model_name == 'NuTrea':
         #     self.model = NuTrea(self.args,  len(self.entity2id), self.num_kb_relation,
         #                           self.num_word)
@@ -127,8 +131,12 @@ class Trainer_KBQA(object):
         # self.evaluate(self.test_data, self.test_batch_size)
         print("Start Training------------------")
         for epoch in range(start_epoch, end_epoch + 1):
+            stats_dict = {'epoch': epoch + 1}
             st = time.time()
             loss, extras, h1_list_all, f1_list_all = self.train_epoch()
+            stats_dict['train_loss'] = np.mean(loss)
+            stats_dict['train_h1'] = np.mean(h1_list_all)
+            stats_dict['train_f1'] = np.mean(f1_list_all)
 
             if self.decay_rate > 0:
                 self.scheduler.step()
@@ -139,6 +147,8 @@ class Trainer_KBQA(object):
             if (epoch + 1) % eval_every == 0:
                 eval_f1, eval_h1, eval_em = self.evaluate(self.valid_data, self.test_batch_size)
                 self.logger.info("EVAL F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(eval_f1, eval_h1, eval_em))
+                stats_dict['val_f1'] = eval_f1
+                stats_dict['val_h1'] = eval_h1
                 # eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 # self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
                 do_test = False
@@ -157,6 +167,7 @@ class Trainer_KBQA(object):
 
                 eval_f1, eval_h1, eval_em = self.evaluate(self.test_data, self.test_batch_size)
                 self.logger.info("TEST F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(eval_f1, eval_h1, eval_em))
+                self.history.append(stats_dict)
                 # if do_test:
                 #     eval_f1, eval_h1 = self.evaluate(self.test_data, self.test_batch_size)
                 #     self.logger.info("TEST F1: {:.4f}, H1: {:.4f}".format(eval_f1, eval_h1))
@@ -174,6 +185,7 @@ class Trainer_KBQA(object):
                 # if self.reset_time >= 5:
                 #     self.logger.info('No improvement after 5 evaluation. Early Stopping.')
                 #     break
+        self.plot_metrics()
         self.save_ckpt("final")
         self.logger.info('Train Done! Evaluate on testset with saved model')
         print("End Training------------------")
@@ -250,4 +262,64 @@ class Trainer_KBQA(object):
         model = self.model
         #self.logger.info("Load param of {} from {}.".format(", ".join(list(model_state_dict.keys())), filename))
         model.load_state_dict(model_state_dict, strict=False)
+
+    def plot_metrics(self):
+        if not self.history:
+            self.logger.info("No history to plot.")
+            return
+
+        # Ensure matplotlib and pandas are imported (already added at top, but good to double check)
+        try:
+            import pandas as pd
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.logger.error("Pandas or Matplotlib not found. Cannot generate plots.")
+            return
+
+        df = pd.DataFrame(self.history)
+
+        try:
+            # --- Plot 1: Loss ---
+            plt.figure(figsize=(10, 5))
+            plt.plot(df['epoch'], df['train_loss'], label='Training Loss', marker='o')
+            plt.title('Training Loss vs. Epochs')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            loss_plot_path = os.path.join(self.args['checkpoint_dir'], f"{self.args['experiment_name']}_loss_plot.png")
+            plt.savefig(loss_plot_path)
+            plt.clf()
+            self.logger.info(f"Loss plot saved to {loss_plot_path}")
+
+            # --- Plot 2: H1 and F1 Metrics ---
+            plt.figure(figsize=(10, 5))
+            # Training metrics
+            plt.plot(df['epoch'], df['train_h1'], label='Training H1', marker='o', linestyle='-')
+            plt.plot(df['epoch'], df['train_f1'], label='Training F1', marker='o', linestyle='-')
+
+            # Validation metrics (pandas plot handles NaNs gracefully by not plotting them)
+            if 'val_h1' in df.columns:
+                plt.plot(df['epoch'], df['val_h1'], label='Validation H1', marker='x', linestyle='--')
+            if 'val_f1' in df.columns:
+                plt.plot(df['epoch'], df['val_f1'], label='Validation F1', marker='x', linestyle='--')
+
+            plt.title('Metrics (H1, F1) vs. Epochs')
+            plt.xlabel('Epoch')
+            plt.ylabel('Score')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            metrics_plot_path = os.path.join(self.args['checkpoint_dir'],
+                                             f"{self.args['experiment_name']}_metrics_plot.png")
+            plt.savefig(metrics_plot_path)
+            plt.clf()
+            self.logger.info(f"Metrics plot saved to {metrics_plot_path}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate plots: {e}")
+
+        finally:
+            plt.close('all')  # Close all figures to free memory
 

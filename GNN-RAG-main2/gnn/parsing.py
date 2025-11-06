@@ -49,7 +49,7 @@ def add_shared_args(parser):
     parser.add_argument('--lr_schedule', action='store_true')
     parser.add_argument('--label_smooth', default=0.1, type=float)
     parser.add_argument('--fact_drop', default=0, type=float)
-    #parser.add_argument('--encode_type', action='store_true')
+    # parser.add_argument('--encode_type', action='store_true')
 
     # model options
 
@@ -59,14 +59,13 @@ def add_shared_args(parser):
     parser.add_argument('--experiment_name', default='', type=str)
     parser.add_argument('--load_experiment', default=None, type=str)
     parser.add_argument('--load_ckpt_file', default=None, type=str)
-    parser.add_argument('--eps', default=0.95, type=float) # threshold for f1
+    parser.add_argument('--eps', default=0.95, type=float)  # threshold for f1
     parser.add_argument('--test_batch_size', default=20, type=int)
     parser.add_argument('--q_type', default='seq', type=str)
 
 
 
 def add_parse_args(parser):
-    
     subparsers = parser.add_subparsers(help='Reason KGQA model')
 
     parser_rearev = subparsers.add_parser("ReaRev")
@@ -81,9 +80,10 @@ def add_parse_args(parser):
     parser_nutrea = subparsers.add_parser("NuTrea")
     create_parser_nutrea(parser_nutrea)
 
+    parser_rearevhgnn = subparsers.add_parser("ReaRevHGNN")
+    create_parser_rearevhgnn(parser_rearevhgnn)
 
 def create_parser_rearev(parser):
-
     parser.add_argument('--model_name', default='ReaRev', type=str, choices=['ReaRev'])
     parser.add_argument('--alg', default='bfs', type=str)
     parser.add_argument('--num_iter', default=2, type=int)
@@ -121,7 +121,7 @@ def create_parser_graftnet(parser):
     parser.add_argument('--norm_rel', action='store_true')
     parser.add_argument('--normalized_gnn', default=False, type=bool_flag)
     parser.add_argument('--data_eff', action='store_true')
-    #parser.add_argument('--use_self_loop', default=True, type=bool_flag)
+    # parser.add_argument('--use_self_loop', default=True, type=bool_flag)
     add_shared_args(parser)
 
 def create_parser_nutrea(parser):
@@ -129,4 +129,26 @@ def create_parser_nutrea(parser):
     parser.add_argument('--loss_type', default='kl', type=str)
     parser.add_argument('--use_self_loop', default=True, type=bool_flag)
     parser.add_argument('--normalized_gnn', default=False, type=bool_flag)
+    add_shared_args(parser)
+
+
+def create_parser_rearevhgnn(parser):
+    parser.add_argument('--model_name', default='ReaRevHGNN', type=str, choices=['ReaRevHGNN'])
+    # 添加ReaRev原有的参数
+    parser.add_argument('--alg', default='bfs', type=str)
+    parser.add_argument('--num_iter', default=2, type=int)
+    parser.add_argument('--num_ins', default=3, type=int)
+    parser.add_argument('--num_gnn', default=3, type=int)
+    parser.add_argument('--loss_type', default='kl', type=str)
+    parser.add_argument('--use_self_loop', default=True, type=bool_flag)
+    parser.add_argument('--norm_rel', action='store_true')
+    parser.add_argument('--data_eff', action='store_true')
+    parser.add_argument('--normalized_gnn', default=False, type=bool_flag)
+    parser.add_argument('--pos_emb', action='store_true')
+    # --- 添加HGNN相关的新超参数 ---
+    parser.add_argument('--num_relation_clusters', default=5, type=int, help='Number of clusters for relations')
+    parser.add_argument('--num_node_clusters', default=10, type=int,
+                        help='Number of clusters for nodes within a relation cluster')
+    parser.add_argument('--num_hyper_gnn_layers', default=3, type=int, help='Number of HGNN layers')
+    # 添加共享参数
     add_shared_args(parser)

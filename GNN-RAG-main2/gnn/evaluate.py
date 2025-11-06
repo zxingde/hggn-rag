@@ -1,4 +1,3 @@
-
 from tqdm import tqdm
 tqdm.monitor_iterval = 0
 import torch
@@ -31,7 +30,7 @@ def f1_and_hits(answers, candidate2prob, id2entity, entity2name, eps=0.5):
         else:
             ans.append(entity2name[id2entity[a]])
     correct = 0
-    cand_list = sorted(candidate2prob, key=lambda x:x[1], reverse=True)
+    cand_list = sorted(candidate2prob, key=lambda x: x[1], reverse=True)
     if len(cand_list) == 0:
         best_ans = -1
     else:
@@ -42,7 +41,7 @@ def f1_and_hits(answers, candidate2prob, id2entity, entity2name, eps=0.5):
         if entity2name is None:
             retrieved.append((id2entity[c], prob))
         else:
-           retrieved.append((entity2name[id2entity[c]], prob))
+            retrieved.append((entity2name[id2entity[c]], prob))
         tp_prob += prob
         if c in answers:
             correct += 1
@@ -56,11 +55,11 @@ def f1_and_hits(answers, candidate2prob, id2entity, entity2name, eps=0.5):
         if len(retrieved) == 0:
             return 1.0, 1.0, 1.0, 1.0, 1.0, 0, retrieved, ans  # precision, recall, f1, hits, em
         else:
-            return 0.0, 1.0, 0.0, 1.0, 1.0, 1, retrieved , ans # precision, recall, f1, hits, em
+            return 0.0, 1.0, 0.0, 1.0, 1.0, 1, retrieved, ans  # precision, recall, f1, hits, em
     else:
         hits = float(best_ans in answers)
         if len(retrieved) == 0:
-            return 1.0, 0.0, 0.0, hits, hits, 2, retrieved , ans # precision, recall, f1, hits, em
+            return 1.0, 0.0, 0.0, hits, hits, 2, retrieved, ans  # precision, recall, f1, hits, em
         else:
             p, r = correct / len(retrieved), correct / len(answers)
             f1 = 2.0 / (1.0 / p + 1.0 / r) if p != 0 and r != 0 else 0.0
@@ -74,7 +73,7 @@ class Evaluator:
         self.args = args
         self.eps = args['eps']
         self.model_name = args["model_name"]
-        
+
         id2entity = {idx: entity for entity, idx in entity2id.items()}
         self.id2entity = id2entity
 
@@ -84,7 +83,6 @@ class Evaluator:
             self.entity2name = list((pickle.load(file)).keys())
             file.close()
 
-            
         id2relation = {idx: relation for relation, idx in relation2id.items()}
         num_rel_ori = len(relation2id)
 
@@ -105,7 +103,7 @@ class Evaluator:
 
     def write_info(self, valid_data, tp_list, num_step):
         question_list = valid_data.get_quest()
-        #num_step = steps
+        # num_step = steps
         obj_list = []
         if tp_list is not None:
             # attn_list = [tp[1] for tp in tp_list]
@@ -144,7 +142,7 @@ class Evaluator:
         eps = self.eps
         id2entity = self.id2entity
         eval_loss, eval_acc, eval_max_acc = [], [], []
-        f1s, hits, ems,  precisions, recalls = [], [], [], [], []
+        f1s, hits, ems, precisions, recalls = [], [], [], [], []
         valid_data.reset_batches(is_sequential=True)
         num_epoch = math.ceil(valid_data.num_data / test_batch_size)
         if write_info and self.file_write is None:
@@ -161,10 +159,13 @@ class Evaluator:
                 pred = torch.max(pred_dist, dim=1)[1]
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
-                seed_dist, true_batch_id, answer_dist, answer_list = batch
+                    seed_dist, true_batch_id, answer_dist, answer_list = batch
+            elif self.model_name == 'ReaRevHGNN':  # <--- 添加这个 ELIF 块
+                local_entity, query_entities, _, batch_hyperedges, query_text, \
+                    seed_dist, true_batch_id, answer_dist, answer_list = batch
             else:
                 local_entity, query_entities, _, query_text, \
-                seed_dist, true_batch_id, answer_dist, answer_list = batch
+                    seed_dist, true_batch_id, answer_dist, answer_list = batch
             # self.true_batch_id = true_batch_id
             if write_info:
                 obj_list = self.write_info(valid_data, tp_list, self.model.num_iter)
@@ -177,26 +178,26 @@ class Evaluator:
             eval_loss.append(loss.item())
             # eval_acc.append(acc)
             # eval_max_acc.append(max_acc)
-            #pr_dist2 = pred_dist#.copy()
-            #pred_dist = pr_dist2[-1]
+            # pr_dist2 = pred_dist#.copy()
+            # pred_dist = pr_dist2[-1]
             batch_size = pred_dist.size(0)
             batch_answers = answer_list
             batch_candidates = candidate_entities
             pad_ent_id = len(id2entity)
-            #pr_dist2 = pred_dist.copy()
-            #for pred_dist in pr_dist2:
+            # pr_dist2 = pred_dist.copy()
+            # for pred_dist in pr_dist2:
             for batch_id in range(batch_size):
                 answers = batch_answers[batch_id]
                 candidates = batch_candidates[batch_id, :].tolist()
                 probs = pred_dist[batch_id, :].tolist()
                 seed_entities = query_entities[batch_id, :].tolist()
-                #print(seed_entities)
-                #print(candidates)
+                # print(seed_entities)
+                # print(candidates)
                 candidate2prob = []
                 for c, p, s in zip(candidates, probs, seed_entities):
                     if s == 1.0:
                         # ignore seed entities
-                        #print(c, self.id2entity)
+                        # print(c, self.id2entity)
                         # print(c, p, s)
                         # if c < pad_ent_id:
                         #     tp_obj['seed'] = self.id2entity[c]
@@ -232,7 +233,7 @@ class Evaluator:
         print('avg_f1', np.mean(f1s))
         print('avg_precision', np.mean(precisions))
         print('avg_recall', np.mean(recalls))
-        
+
         print(case_ct)
         if write_info:
             self.file_write.close()
