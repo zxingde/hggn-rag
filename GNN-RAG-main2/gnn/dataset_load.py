@@ -191,7 +191,7 @@ class BasicDataLoader(object):
             elif self.tokenize  == 'roberta':
                 tokenizer_name = 'roberta-base'
             elif self.tokenize  == 'sbert':
-                tokenizer_name = 'sentence-transformers/all-MiniLM-L6-v2'
+                tokenizer_name = '/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert'
             elif self.tokenize == 'sbert2':
                 tokenizer_name = 'sentence-transformers/all-mpnet-base-v2'
             elif self.tokenize  == 't5':
@@ -205,7 +205,7 @@ class BasicDataLoader(object):
 
             self.max_query_word = max_count + 2 #for cls token and sep
             #self.tokenizer = AutoTokenizer(self.max_query_word)
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, local_files_only=True)
             self.num_word = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token) #self.tokenizer.q_tokenizer.encode("[UNK]")[0]
             
             self.query_texts = np.full((self.num_data, self.max_query_word), self.num_word, dtype=int)
@@ -402,7 +402,7 @@ class BasicDataLoader(object):
             elif tokenize == 'roberta':
                 tokenizer_name = 'roberta-base'
             elif tokenize == 'sbert':
-                tokenizer_name = 'sentence-transformers/all-MiniLM-L6-v2'
+                tokenizer_name = '/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert'
             elif tokenize == 'sbert2':
                 tokenizer_name = 'sentence-transformers/all-mpnet-base-v2'
             elif tokenize == 'simcse':
