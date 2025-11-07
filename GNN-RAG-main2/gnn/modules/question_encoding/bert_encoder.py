@@ -36,9 +36,9 @@ class BERTInstruction(BaseInstruction):
             self.pretrained_weights = 'roberta-base'
             word_dim = 768#self.word_dim
         elif model == 'sbert':
-            self.tokenizer = AutoTokenizer.from_pretrained('/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert', local_files_only=True)
-            self.pretrained_weights = '/home/bi3/zxd_env/GNN-RAG-main2/gnn/sbert'
-            word_dim = 768  # self.word_dim
+            self.tokenizer = AutoTokenizer.from_pretrained('./sbert', local_files_only=True)
+            self.pretrained_weights = './sbert'
+            word_dim = 384  # self.word_dim
         elif model == 'simcse':
             #print('ok')
             self.tokenizer = AutoTokenizer.from_pretrained('princeton-nlp/sup-simcse-bert-base-uncased')
