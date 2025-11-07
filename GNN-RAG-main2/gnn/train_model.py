@@ -281,6 +281,64 @@ class Trainer_KBQA(object):
         try:
             # --- Plot 1: Loss ---
             plt.figure(figsize=(10, 5))
+            # FIX: Added .values to convert pandas Series to numpy array
+            plt.plot(df['epoch'].values, df['train_loss'].values, label='Training Loss', marker='o')
+            plt.title('Training Loss vs. Epochs')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            loss_plot_path = os.path.join(self.args['checkpoint_dir'], f"{self.args['experiment_name']}_loss_plot.png")
+            plt.savefig(loss_plot_path)
+            plt.clf()
+            self.logger.info(f"Loss plot saved to {loss_plot_path}")
+
+            # --- Plot 2: H1 and F1 Metrics ---
+            plt.figure(figsize=(10, 5))
+            # FIX: Added .values to convert pandas Series to numpy array
+            plt.plot(df['epoch'].values, df['train_h1'].values, label='Training H1', marker='o', linestyle='-')
+            plt.plot(df['epoch'].values, df['train_f1'].values, label='Training F1', marker='o', linestyle='-')
+
+            # Validation metrics (pandas plot handles NaNs gracefully by not plotting them)
+            if 'val_h1' in df.columns:
+                # FIX: Added .values to convert pandas Series to numpy array
+                plt.plot(df['epoch'].values, df['val_h1'].values, label='Validation H1', marker='x', linestyle='--')
+            if 'val_f1' in df.columns:
+                # FIX: Added .values to convert pandas Series to numpy array
+                plt.plot(df['epoch'].values, df['val_f1'].values, label='Validation F1', marker='x', linestyle='--')
+
+            plt.title('Metrics (H1, F1) vs. Epochs')
+            plt.xlabel('Epoch')
+            plt.ylabel('Score')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            metrics_plot_path = os.path.join(self.args['checkpoint_dir'],
+                                             f"{self.args['experiment_name']}_metrics_plot.png")
+            plt.savefig(metrics_plot_path)
+            plt.clf()
+            self.logger.info(f"Metrics plot saved to {metrics_plot_path}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate plots: {e}")
+
+        finally:
+            plt.close('all')  # Close all figures to free memory
+
+        # Ensure matplotlib and pandas are imported (already added at top, but good to double check)
+        try:
+            import pandas as pd
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.logger.error("Pandas or Matplotlib not found. Cannot generate plots.")
+            return
+
+        df = pd.DataFrame(self.history)
+
+        try:
+            # --- Plot 1: Loss ---
+            plt.figure(figsize=(10, 5))
             plt.plot(df['epoch'], df['train_loss'], label='Training Loss', marker='o')
             plt.title('Training Loss vs. Epochs')
             plt.xlabel('Epoch')
