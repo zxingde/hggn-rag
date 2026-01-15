@@ -324,6 +324,22 @@ class ReaRevHGNN(BaseModel):
                 # ============== 修复结束 ==============
 
             # 6. Detach (断开梯度，只存数值)
+                # ==================== 插入开始：强制计算并修复维度 ====================
+                # 1. 确保 topk_node_vecs 维度正确 (防止 4维 报错)
+            if topk_node_vecs.dim() == 4:
+                    topk_node_vecs = topk_node_vecs.squeeze(1)
+
+                # 2. 确保 global_vec 维度正确
+            if global_vec.dim() == 4:
+                global_vec = global_vec.squeeze(1)
+            if global_vec.dim() == 2:
+                global_vec = global_vec.unsqueeze(1)  # 变成 [Batch, 1, Dim]
+
+                # 3. 【关键】强制赋值！确保它不是 None
+            final_graph_sequence = torch.cat([global_vec, topk_node_vecs], dim=1)
+                # ==================== 插入结束 ====================
+
+                # 下面是你报错的第 327 行（保持原样，或者确保它在上面代码之后）
             final_graph_sequence = final_graph_sequence.detach().cpu()
 
         # ==================== 修改结束 ====================
