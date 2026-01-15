@@ -303,7 +303,25 @@ class ReaRevHGNN(BaseModel):
                 global_vec = torch.zeros(batch_size, 1, dim).to(self.device)
 
             # 5. 拼接：[Global(1) + TopK(10)] -> [batch, 11, dim]
-            final_graph_sequence = torch.cat([global_vec, topk_node_vecs], dim=1)
+                # ============== 修复开始：强行对齐维度 ==============
+                # 目标：让两个变量都变成 3 维：[Batch, Seq_Len, Dim]
+
+                # 1. 检查 topk_node_vecs (通常它是那个 4 维的罪魁祸首)
+                if topk_node_vecs.dim() == 4:
+                    # 如果是 [Batch, 1, K, Dim]，把那个 1 压掉
+                    topk_node_vecs = topk_node_vecs.squeeze(1)
+
+                # 2. 检查 global_vec (通常它是 3 维的，但也防止万一)
+                if global_vec.dim() == 4:
+                    global_vec = global_vec.squeeze(1)
+
+                # 3. 防止 global_vec 只有 2 维 [Batch, Dim]
+                if global_vec.dim() == 2:
+                    global_vec = global_vec.unsqueeze(1)
+
+                # 4. 原来的拼接代码
+                final_graph_sequence = torch.cat([global_vec, topk_node_vecs], dim=1)
+                # ============== 修复结束 ==============
 
             # 6. Detach (断开梯度，只存数值)
             final_graph_sequence = final_graph_sequence.detach().cpu()
