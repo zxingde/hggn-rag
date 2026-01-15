@@ -390,14 +390,6 @@ class BasicDataLoader(object):
                     g2l = self.global2local_entity_maps[next_id]
                     num_nodes_in_sample = len(g2l)
                     hyperedges_for_one_graph = set()
-                    if not self.data_eff:
-                        (head_list, rel_list, tail_list) = self.kb_adj_mats[next_id]
-                    else:
-                        (head_list, rel_list, tail_list) = self.create_kb_adj_mats(sample_id=next_id)
-
-                    g2l = self.global2local_entity_maps[next_id]
-                    num_nodes_in_sample = len(g2l)
-                    hyperedges_for_one_graph = set()
 
                     if num_nodes_in_sample > 0 and len(head_list) > 0:
                         graphs_by_relation = [nx.Graph() for _ in range(len(self.relation2id))]
@@ -766,7 +758,7 @@ class SingleDataLoader(BasicDataLoader):
                 node_indices = pyg_hypergraph_batch.hyperedge_index[0]  # 全局节点索引
                 node_batch_ptr = pyg_hypergraph_batch.batch  # 节点所属图 batch vector
                 connection_batch_ptr = node_batch_ptr[node_indices]  # 连接所属图 batch vector
-                assert connection_batch_ptr.max() < self.batch_size, \
+                assert connection_batch_ptr.max() < batch_size, \
                     f"Error: Connection batch index out of bounds! Max found: {connection_batch_ptr.max()}, Batch Size: {self.batch_size}"
                 # ---!!! 关键：获取原始的本地超边索引 !!!---
                 # 我们需要一种方法来获取 Batch.from_data_list 处理之前的、正确的本地超边索引。
