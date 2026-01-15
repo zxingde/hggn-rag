@@ -231,7 +231,7 @@ class Trainer_KBQA(object):
             batch = self.train_data.get_batch(iteration, self.args['batch_size'], self.args['fact_drop'])
             
             self.optim_model.zero_grad()
-            loss, _, _, tp_list = self.model(batch, training=True)
+            loss, _, _, tp_list,_ = self.model(batch, training=True)
             # if tp_list is not None:
             h1_list, f1_list = tp_list
             h1_list_all.extend(h1_list)
