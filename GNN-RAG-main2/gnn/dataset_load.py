@@ -30,6 +30,16 @@ class BasicDataLoader(object):
         self._parse_args(config, word2id, relation2id, entity2id)
         self._load_file(config, data_type)
         self.model_name = config.get('model_name', None)
+        # ================== 【新增：定义缓存路径】 ==================
+        # 1. 提取数据集名称 (例如 WebQSP)
+        data_folder = config.get('data_folder', './data')
+        dataset_name = os.path.basename(os.path.normpath(data_folder))
+
+        # 2. 拼接缓存路径: data/WebQSP/cache/WebQSP_louvain_train.pt
+        cache_dir = os.path.join(data_folder, 'cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        self.cache_path = os.path.join(cache_dir, f"{dataset_name}_louvain_{data_type}.pt")
+        # ==========================================================
         self._load_data()
 
     def _load_file(self, config, data_type="train"):
@@ -168,6 +178,22 @@ class BasicDataLoader(object):
         global2local_entity_maps: a map from global entity id to local entity id
         adj_mats: a local adjacency matrix for each relation. relation 0 is reserved for self-connection.
         """
+        # ================== 【新增 1/3：尝试加载缓存】 ==================
+        cached_list = None
+        if self.model_name == 'ReaRevHGNN' and os.path.exists(self.cache_path):
+            print(f" [Cache] Found cache at {self.cache_path}, loading...")
+            try:
+                cached_list = torch.load(self.cache_path)
+                # 校验长度是否一致，防止数据源变了但缓存没更新
+                if len(cached_list) != self.num_data:
+                    print(f"⚠️ Cache size mismatch ({len(cached_list)} vs {self.num_data}), recomputing...")
+                    cached_list = None
+                else:
+                    print(f"✅ [Cache] Loaded {len(cached_list)} graphs successfully.")
+            except Exception as e:
+                print(f" [Cache] Error loading cache: {e}. Recomputing...")
+                cached_list = None
+        # ===============================================================
         max_count = 0
         for line in self.data:
             word_list = line["question"].split(' ')
@@ -344,57 +370,77 @@ class BasicDataLoader(object):
                                              np.array(tail_list, dtype=int))
             # ================== 开始预构建 PyG 超图 ==================
             if self.model_name == 'ReaRevHGNN':
-                if not self.data_eff:
-                    (head_list, rel_list, tail_list) = self.kb_adj_mats[next_id]
+                if cached_list is not None:
+                    # --- A 计划：直接从缓存恢复 ---
+                    cache_item = cached_list[next_id]
+                    # 还原 PyG Data 对象
+                    pyg_data = Data(num_nodes=cache_item['num_nodes'], hyperedge_index=cache_item['he_idx'])
+                    pyg_data.num_hyperedges = cache_item['num_he']  # 恢复超边数量
+
+                    self.hypergraph_data[next_id] = pyg_data
+
                 else:
-                    (head_list, rel_list, tail_list) = self.create_kb_adj_mats(sample_id=next_id)
+                    # --- B 计划：现场计算 (你原来的代码逻辑) ---
+                    # 1. 获取邻接表
+                    if not self.data_eff:
+                        (head_list, rel_list, tail_list) = self.kb_adj_mats[next_id]
+                    else:
+                        (head_list, rel_list, tail_list) = self.create_kb_adj_mats(sample_id=next_id)
 
-                g2l = self.global2local_entity_maps[next_id]
-                num_nodes_in_sample = len(g2l)
-                hyperedges_for_one_graph = set()
+                    g2l = self.global2local_entity_maps[next_id]
+                    num_nodes_in_sample = len(g2l)
+                    hyperedges_for_one_graph = set()
+                    if not self.data_eff:
+                        (head_list, rel_list, tail_list) = self.kb_adj_mats[next_id]
+                    else:
+                        (head_list, rel_list, tail_list) = self.create_kb_adj_mats(sample_id=next_id)
 
-                if num_nodes_in_sample > 0 and len(head_list) > 0:
-                    graphs_by_relation = [nx.Graph() for _ in range(len(self.relation2id))]
-                    num_relations = len(self.relation2id)
-                    for h, r, t in zip(head_list, rel_list, tail_list):
-                        if r < num_relations:
-                            graphs_by_relation[r].add_edge(h, t)
-                    for rel_graph in graphs_by_relation:
-                        if rel_graph.number_of_nodes() > 0:
-                            try:
-                                partition = community_louvain.best_partition(rel_graph)
-                                communities = defaultdict(list)
-                                for node, community_id in partition.items():
-                                    communities[community_id].append(node)
-                                for community_id, nodes in communities.items():
-                                    if len(nodes) > 1:
-                                        hyperedges_for_one_graph.add(tuple(sorted(nodes)))
-                            except Exception as e:
-                                pass
+                    g2l = self.global2local_entity_maps[next_id]
+                    num_nodes_in_sample = len(g2l)
+                    hyperedges_for_one_graph = set()
 
-                                # --- PyG 转换逻辑 ---
-                hyperedges_list = list(hyperedges_for_one_graph)
-                num_hyperedges_in_sample = len(hyperedges_list)
+                    if num_nodes_in_sample > 0 and len(head_list) > 0:
+                        graphs_by_relation = [nx.Graph() for _ in range(len(self.relation2id))]
+                        num_relations = len(self.relation2id)
+                        for h, r, t in zip(head_list, rel_list, tail_list):
+                            if r < num_relations:
+                                graphs_by_relation[r].add_edge(h, t)
+                        for rel_graph in graphs_by_relation:
+                            if rel_graph.number_of_nodes() > 0:
+                                try:
+                                    partition = community_louvain.best_partition(rel_graph)
+                                    communities = defaultdict(list)
+                                    for node, community_id in partition.items():
+                                        communities[community_id].append(node)
+                                    for community_id, nodes in communities.items():
+                                        if len(nodes) > 1:
+                                            hyperedges_for_one_graph.add(tuple(sorted(nodes)))
+                                except Exception as e:
+                                    pass
 
-                # 创建二部图索引: [节点, 超边]
-                edge_index_rows = []  # 节点索引
-                edge_index_cols = []  # 超边索引 (从 0 到 num_hyperedges_in_sample-1)
+                                    # --- PyG 转换逻辑 ---
+                    hyperedges_list = list(hyperedges_for_one_graph)
+                    num_hyperedges_in_sample = len(hyperedges_list)
 
-                for he_idx, he_tuple in enumerate(hyperedges_list):
-                    for node_idx in he_tuple:
-                        if node_idx < num_nodes_in_sample:  # 安全检查
-                            edge_index_rows.append(node_idx)
-                            edge_index_cols.append(he_idx)
+                    # 创建二部图索引: [节点, 超边]
+                    edge_index_rows = []  # 节点索引
+                    edge_index_cols = []  # 超边索引 (从 0 到 num_hyperedges_in_sample-1)
 
-                hyperedge_index = torch.tensor([edge_index_rows, edge_index_cols], dtype=torch.long)
+                    for he_idx, he_tuple in enumerate(hyperedges_list):
+                        for node_idx in he_tuple:
+                            if node_idx < num_nodes_in_sample:  # 安全检查
+                                edge_index_rows.append(node_idx)
+                                edge_index_cols.append(he_idx)
 
-                # 创建 PyG Data 对象
-                pyg_data = Data(num_nodes=num_nodes_in_sample, hyperedge_index=hyperedge_index)
-                pyg_data.num_hyperedges = num_hyperedges_in_sample  # 存储超边数量
+                    hyperedge_index = torch.tensor([edge_index_rows, edge_index_cols], dtype=torch.long)
 
-                self.hypergraph_data[next_id] = pyg_data
+                    # 创建 PyG Data 对象
+                    pyg_data = Data(num_nodes=num_nodes_in_sample, hyperedge_index=hyperedge_index)
+                    pyg_data.num_hyperedges = num_hyperedges_in_sample  # 存储超边数量
 
-                # ================== 结束预构建超图 ==================
+                    self.hypergraph_data[next_id] = pyg_data
+
+                    # ================== 结束预构建超图 ==================
             next_id += 1
         num_no_query_ent = 0
         num_one_query_ent = 0
@@ -407,6 +453,26 @@ class BasicDataLoader(object):
                 num_no_query_ent += 1
             else:
                 num_multiple_ent += 1
+
+        if self.model_name == 'ReaRevHGNN' and cached_list is None:
+            print(f" [Cache] Saving computed hypergraphs to {self.cache_path} ...")
+            save_list = []
+            for i in range(self.num_data):
+                pyg_data = self.hypergraph_data[i]
+                # 提取关键信息存成字典 (轻量化)
+                save_item = {
+                    'he_idx': pyg_data.hyperedge_index,
+                    'num_nodes': pyg_data.num_nodes,
+                    'num_he': pyg_data.num_hyperedges  # 记得存这个！
+                }
+                save_list.append(save_item)
+
+            # 保存文件
+            torch.save(save_list, self.cache_path)
+            print("✅ [Cache] Saved.")
+            # ==========================================================
+
+        num_no_query_ent = 0
         print("{} cases in total, {} cases without query entity, {} cases with single query entity,"
               " {} cases with multiple query entities".format(next_id, num_no_query_ent,
                                                               num_one_query_ent, num_multiple_ent))
@@ -700,7 +766,8 @@ class SingleDataLoader(BasicDataLoader):
                 node_indices = pyg_hypergraph_batch.hyperedge_index[0]  # 全局节点索引
                 node_batch_ptr = pyg_hypergraph_batch.batch  # 节点所属图 batch vector
                 connection_batch_ptr = node_batch_ptr[node_indices]  # 连接所属图 batch vector
-
+                assert connection_batch_ptr.max() < self.batch_size, \
+                    f"Error: Connection batch index out of bounds! Max found: {connection_batch_ptr.max()}, Batch Size: {self.batch_size}"
                 # ---!!! 关键：获取原始的本地超边索引 !!!---
                 # 我们需要一种方法来获取 Batch.from_data_list 处理之前的、正确的本地超边索引。
                 # 最直接的方法是重新从 data_list 构造它。

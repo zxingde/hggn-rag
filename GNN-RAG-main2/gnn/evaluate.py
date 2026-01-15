@@ -136,6 +136,9 @@ class Evaluator:
         return obj_list
 
     def evaluate(self, valid_data, test_batch_size=20, write_info=False):
+        graph_data_store = {}
+
+
         write_info = True
         self.model.eval()
         self.count = 0
@@ -155,7 +158,7 @@ class Evaluator:
         for iteration in tqdm(range(num_epoch)):
             batch = valid_data.get_batch(iteration, test_batch_size, fact_dropout=0.0, test=True)
             with torch.no_grad():
-                loss, extras, pred_dist, tp_list = self.model(batch[:-1])
+                loss, extras, pred_dist, tp_list, graph_seq = self.model(batch[:-1])
                 pred = torch.max(pred_dist, dim=1)[1]
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
@@ -166,6 +169,18 @@ class Evaluator:
             else:
                 local_entity, query_entities, _, query_text, \
                     seed_dist, true_batch_id, answer_dist, answer_list = batch
+
+            if graph_seq is not None:
+                # graph_seq 已经是 cpu tensor 了
+                current_batch_numpy = graph_seq.numpy()
+
+                for i, qid_obj in enumerate(true_batch_id):
+                    # 处理 ID 格式 (有时候是 tuple/list)
+                    real_qid = qid_obj if isinstance(qid_obj, str) else qid_obj[0]
+
+                    # 存入字典
+                    graph_data_store[real_qid] = current_batch_numpy[i]
+
             # self.true_batch_id = true_batch_id
             if write_info:
                 obj_list = self.write_info(valid_data, tp_list, self.model.num_iter)
@@ -225,6 +240,15 @@ class Evaluator:
                 ems.append(em)
                 precisions.append(precision)
                 recalls.append(recall)
+
+        print(f"Extraction finished. Saving {len(graph_data_store)} graph sequences...")
+        save_path = os.path.join(self.args['checkpoint_dir'], f"{self.args['experiment_name']}_graph_features.pkl")
+
+        with open(save_path, 'wb') as f:
+            pickle.dump(graph_data_store, f)
+
+        print(f"Successfully saved to: {save_path}")
+        print(f"Shape of one sample: {list(graph_data_store.values())[0].shape} (Expected: [K+1, Dim])")
         print('evaluation.......')
         print('how many eval samples......', len(f1s))
         # print('avg_f1', np.mean(f1s))
