@@ -226,10 +226,17 @@ class ReaRevHGNN(BaseModel):
         """
 
         for t in range(self.num_iter):
+            total_cl_loss = 0
             relation_ins = torch.cat(self.instruction.instructions, dim=1)
             self.curr_dist = current_dist
             for j in range(self.num_gnn):
-                self.curr_dist, global_rep = self.reasoning(self.curr_dist, relation_ins, step=j)
+                self.curr_dist, global_rep, gnn_emb, hgnn_emb = self.reasoning(self.curr_dist, relation_ins, step=j)
+                if training:
+                    # 调用计算对比损失的函数
+                    # 注意：确保你在类里已经添加了 compute_contrastive_loss 函数
+                    step_cl_loss = self.compute_contrastive_loss(gnn_emb, hgnn_emb, node_mask)
+                    total_cl_loss += step_cl_loss
+                # ================================================================
             self.dist_history.append(self.curr_dist)
             qs = []
 
@@ -252,7 +259,13 @@ class ReaRevHGNN(BaseModel):
         # loss = 0
         # for pred_dist in self.dist_history:
         loss = self.calc_loss_label(curr_dist=pred_dist, teacher_dist=answer_dist, label_valid=case_valid)
-
+        # ==================== 【修改 4：将对比损失加入总 Loss】 ====================
+        if training:
+            # 确保你在 __init__ 中定义了 self.cl_weight (例如 0.1 或 0.5)
+            # 如果没定义，这里暂时用常数 0.1 代替也可以
+            weight = getattr(self, 'cl_weight', 0.1)
+            loss = loss + weight * total_cl_loss
+        # ======================================================================
         pred_dist = self.dist_history[-1]
 
         # ==================== 修改开始：提取 Top-K + Global ====================
@@ -304,4 +317,28 @@ class ReaRevHGNN(BaseModel):
         else:
             tp_list = None
         return loss, pred, pred_dist, tp_list,final_graph_sequence
+
+    def compute_contrastive_loss(self, view1, view2, mask=None):
+        """
+        计算对比损失: 拉近 gnn_emb (view1) 和 hgnn_emb (view2) 的距离
+        """
+        # 简单的 Cosine 相似度对比
+        # 如果你想效果更好，可以在 __init__ 里加投影层 self.proj = nn.Linear(...)
+
+        z1 = F.normalize(view1, dim=-1)
+        z2 = F.normalize(view2, dim=-1)
+
+        # 计算正样本相似度 (同节点在两视图应相似)
+        # [Batch, Nodes, Dim] * [Batch, Nodes, Dim] -> sum(-1) -> [Batch, Nodes]
+        pos_sim = torch.sum(z1 * z2, dim=-1)
+
+        # 损失：最小化负的相似度 (即最大化相似度)
+        loss_per_node = -pos_sim
+
+        # 只计算有效节点 (mask 掉 padding)
+        if mask is not None:
+            loss_per_node = loss_per_node * mask.float()
+            return loss_per_node.sum() / (mask.float().sum() + 1e-9)
+        else:
+            return loss_per_node.mean()
 

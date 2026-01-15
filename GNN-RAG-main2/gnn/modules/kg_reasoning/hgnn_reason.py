@@ -272,4 +272,4 @@ class hgnn_reason(BaseGNNLayer):
 
         # 返回下一层需要的分布，以及当前层融合后的特征 (用于外部的指令更新)
         # return_score 参数不再需要，因为分布总是在内部计算
-        return next_layer_dist, fused_emb
+        return next_layer_dist, fused_emb, gnn_emb, hgnn_entity_emb_padded
