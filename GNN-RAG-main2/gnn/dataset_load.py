@@ -715,7 +715,8 @@ class SingleDataLoader(BasicDataLoader):
         sample_ids = self.batches[start: end]
         self.sample_ids = sample_ids
 
-        true_batch_id = None
+        # true_batch_id = None
+        true_batch_id = [self.question_id[i] for i in sample_ids]
         seed_dist = self.seed_distribution[sample_ids]
         q_input = self.deal_q_type(q_type)
         kb_adj_mats = self._build_fact_mat(sample_ids, fact_dropout=fact_dropout)

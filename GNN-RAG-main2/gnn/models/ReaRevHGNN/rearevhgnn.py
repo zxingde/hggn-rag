@@ -270,44 +270,49 @@ class ReaRevHGNN(BaseModel):
 
         # ==================== 修改开始：提取 Top-K + Global ====================
 
-        final_graph_sequence = None  # 初始化返回值
+        # ==================== 修改开始：提取 Top-K + Global ====================
+        final_graph_sequence = None  # 初始化为 None，防止 training 模式下报错
 
         if not training:  # 只有在推理/评估阶段我们需要提取这个向量
-            # 1. 设定 K 值 (比如保存最重要的 10 个节点)
+            # 1. 设定 K 值
             K = 5
-            # 确保 K 不超过当前图的实体数量
             curr_K = min(K, pred_dist.size(1))
 
             # 2. 选出 Top-K 索引
-            # topk_indices: [batch_size, K]
             topk_scores, topk_indices = torch.topk(pred_dist, k=curr_K, dim=1)
 
             # 3. 提取 Top-K 实体的语义向量
-            # self.local_entity_emb: [batch_size, max_local_entity, entity_dim]
-            # 我们需要 gather 出来
             dim = self.local_entity_emb.size(-1)
-
-            # 扩展索引维度以便 gather: [batch, K] -> [batch, K, dim]
             expanded_indices = topk_indices.unsqueeze(-1).expand(-1, -1, dim)
-
-            # 提取向量: [batch, K, dim]
             topk_node_vecs = torch.gather(self.local_entity_emb, 1, expanded_indices)
 
             # 4. 处理全局向量 (Global Rep)
-            # global_rep 是循环里最后一次 reasoning 产出的
-            # global_rep: [batch, dim] -> 变成 [batch, 1, dim]
             if 'global_rep' in locals() and global_rep is not None:
                 global_vec = global_rep.unsqueeze(1)
             else:
-                # 极端情况防爆：如果没有 global_rep，用全0填充
                 global_vec = torch.zeros(batch_size, 1, dim).to(self.device)
 
-            # 5. 拼接：[Global(1) + TopK(10)] -> [batch, 11, dim]
+            # ================== 【关键修复】维度强制对齐 ==================
+            # 解决 RuntimeError: Tensors must have same number of dimensions
+
+            # 1. 检查 topk_node_vecs 是否多了一维 (例如 [B, 1, K, D])
+            if topk_node_vecs.dim() == 4:
+                topk_node_vecs = topk_node_vecs.squeeze(1)
+
+            # 2. 检查 global_vec
+            if global_vec.dim() == 4:
+                global_vec = global_vec.squeeze(1)
+
+            # 3. 确保 global_vec 是 3 维 [Batch, 1, Dim]
+            if global_vec.dim() == 2:
+                global_vec = global_vec.unsqueeze(1)
+            # ============================================================
+
+            # 5. 拼接
             final_graph_sequence = torch.cat([global_vec, topk_node_vecs], dim=1)
 
-            # 6. Detach (断开梯度，只存数值)
+            # 6. Detach
             final_graph_sequence = final_graph_sequence.detach().cpu()
-
         # ==================== 修改结束 ====================
 
         pred = torch.max(pred_dist, dim=1)[1]
