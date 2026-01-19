@@ -1,23 +1,36 @@
-/GNN-RAG-main2/.idea/inspectionProfiles/profiles_settings.xml
-/GNN-RAG-main2/.idea/.gitignore
-/GNN-RAG-main2/.idea/GNN-RAG-main2.iml
-/GNN-RAG-main2/.idea/misc.xml
-/GNN-RAG-main2/.idea/modules.xml
-/GNN-RAG-main2/.idea/vcs.xml
-/GNN-RAG-main2/checkpoint/
-/GNN-RAG-main2/gnn/data/
-/GNN-RAG-main2/gnn/pretrained_lms/
-/GNN-RAG-main2/gnn/sbert/
-/GNN-RAG-main2/llm/datasets/
-/GNN-RAG-main2/llm/results/
-/GNN-RAG-main2/llm/save_models/
-/GNN-RAG-main2/llm/wandb/
+# Python 自动生成的缓存
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE 配置 (PyCharm/Idea)
+.idea/
+
+# 数据、权重与预训练模型
+checkpoint/
+gnn/data/
+gnn/pretrained_lms/
+gnn/sbert/
+llm/datasets/
+llm/results/
+llm/save_models/
+llm/wandb/
+
+# 运行日志与特定后缀文件
 *.out
 *.whl
 *.run
 env*_*.yml
 
+# 文档与媒体文件 (按你要求忽略)
 *.md
 *.png
 .DS_Store
 
+GNN-RAG-main2/gnn/data/
+GNN-RAG-main2/gnn/pretrained_lms/
+GNN-RAG-main2/gnn/sbert/
+GNN-RAG-main2/llm/datasets/
+GNN-RAG-main2/llm/results/
+GNN-RAG-main2/llm/save_models/
+GNN-RAG-main2/llm/wandb/
