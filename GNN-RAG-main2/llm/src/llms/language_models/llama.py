@@ -3,6 +3,7 @@ import torch
 from .base_language_model import BaseLanguageModel
 from transformers import LlamaTokenizer
 from project.GraphProjector import GraphProjector
+from transformers import AutoModelForCausalLM
 import os
 
 class Llama(BaseLanguageModel):
