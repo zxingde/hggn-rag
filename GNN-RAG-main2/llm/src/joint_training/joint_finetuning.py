@@ -140,23 +140,35 @@ class ScriptTrainingArguments(TrainingArguments):
     )
     ddp_find_unused_parameters: bool = field(default=False)
 
-def train():
-    parser = HfArgumentParser((ScriptArguments, ScriptTrainingArguments))
-    script_args, training_args = parser.parse_args_into_dataclasses()
+    def train():
+        parser = HfArgumentParser((ScriptArguments, ScriptTrainingArguments))
+        script_args, training_args = parser.parse_args_into_dataclasses()
 
-    # Load models
-    model = AutoModelForCausalLM.from_pretrained(
-        script_args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        use_auth_token=True,
-    )
+        # 1. 加载基础大模型
+        model = AutoModelForCausalLM.from_pretrained(
+            script_args.model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            use_auth_token=True,
+        )
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        script_args.model_name_or_path,
-        trust_remote_code=True,
-        use_fast=False,
-    )
+        # 2. 【核心修复】立即初始化投影层（必须在大模型加载后、封装前定义）
+        # 注意：这里修正了导入路径，从 project.GraphProjector 导入
+        from project.GraphProjector import GraphProjector
+        print(f"Initializing GraphProjector with dim: 50 -> {model.config.hidden_size}")
+        projector = GraphProjector(gnn_dim=50, llm_dim=model.config.hidden_size)
+        projector.to(model.device).to(model.dtype)
+
+        # 显式开启投影层的梯度，确保它会被训练
+        for param in projector.parameters():
+            param.requires_grad = True
+
+        # 3. 加载 Tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            script_args.model_name_or_path,
+            trust_remote_code=True,
+            use_fast=False,
+        )
 
     # Add new tokens
     special_tokens_dict = dict()
@@ -169,17 +181,7 @@ def train():
 
     tokenizer.padding_side = "right"  # Fix weird overflow issue with fp16 training
 
-    # 2. 【核心修复】先初始化投影层，再进行模型封装
-    # 必须在模型加载并调整完 Embedding Size 后立即初始化
-    print(f"Initializing GraphProjector with dim: 50 -> {model.config.hidden_size}")
-    projector = GraphProjector(gnn_dim=50, llm_dim=model.config.hidden_size)
-    projector.to(model.device).to(model.dtype)
-
-    # 显式开启投影层的梯度
-    for param in projector.parameters():
-        param.requires_grad = True
-
-    # 3. 配置 PEFT/LoRA
+    # 4. 配置 PEFT (LoRA)
     peft_config = None
     if script_args.use_peft:
         if isinstance(script_args.lora_target_modules, str):
@@ -198,23 +200,24 @@ def train():
         from peft import get_peft_model
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
-        # 4. 【核心修复】将封装逻辑移出 PEFT 判断块，并确保 projector 已定义
-        # 无论是否使用 LoRA，都需要套上图特征注入外壳
-        model = GraphLLMForTraining(model, projector)
 
-        # 5. 加载数据集
-        # 确保在训练参数中设置 remove_unused_columns=False，否则 graph_features 会被过滤
-        training_args.remove_unused_columns = False
+    # 5. 【核心修复】封装图注入外壳 (现在 projector 已经定义好了，不会报错了)
+    # 把它移出 PEFT 块，确保无论用不用 LoRA 都能注入图特征
+    model = GraphLLMForTraining(model, projector)
 
-        train_dataset = load_multiple_datasets(
-            script_args.data_path_list,
-            graph_feat_path=script_args.graph_feat_path,
-            shuffle=True
-        )
+    # 6. 设置训练参数
+    # 关键：手动关闭列过滤，否则数据里的 graph_features 会被删掉导致训练报错
+    training_args.remove_unused_columns = False
 
+    # 7. 加载数据集
+    train_dataset = load_multiple_datasets(
+        script_args.data_path_list,
+        graph_feat_path=script_args.graph_feat_path,
+        shuffle=True
+    )
     # --- 新增：初始化投影层 ---
     # 维度要与你的 GNN 特征 (50) 和 Llama 隐藏层 (model.config.hidden_size) 对齐
-    from models import GraphProjector  # 确保能引用到你写的类
+    from project.GraphProjector import GraphProjector  # 确保能引用到你写的类
     projector = GraphProjector(gnn_dim=50, llm_dim=model.config.hidden_size)
     projector.to(model.device).to(model.dtype)
 
