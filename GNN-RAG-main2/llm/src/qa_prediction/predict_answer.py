@@ -128,13 +128,12 @@ def prediction(data, processed_list, input_builder, model, encrypt=False, data_f
     question = data["question"]
     answer = data["answer"]
     entities = data['q_entity']
-    
+
     data["cand"] = None
     id = data["id"]
     if data_file_gnn is not None:
-        
         lineg = data_file_gnn[data["id"]]
-        cand = lineg['cand'] 
+        cand = lineg['cand']
         predictiong = []
         for c in cand:
             if c[0] in entities_names:
@@ -142,35 +141,43 @@ def prediction(data, processed_list, input_builder, model, encrypt=False, data_f
             else:
                 predictiong.append(c[0])
         data["cand"] = predictiong
-    
-    
+
     if id in processed_list:
         return None
-    
+
     if model is None:
-        prediction = input_builder.direct_answer(data)
+        prediction_val = input_builder.direct_answer(data)
         return {
             "id": id,
             "question": question,
-            "prediction": prediction,
+            "prediction": prediction_val,
             "ground_truth": answer,
             "input": question,
         }
-    
-    input = input_builder.process_input(data)
-    # --- 修改：从 data 中取出特征并传给模型 ---
+
+    # 构建文本输入
+    input_text = input_builder.process_input(data)
+
+    # --- 修复逻辑错误：从 data 中取出特征并传给模型 ---
+    # 获取之前注入的 graph_features 字段
     graph_feat = data.get('graph_features', None)
-    prediction = model.generate_sentence(input, graph_feat=graph_feat).strip()
-    # ---------------------------------------
-    prediction = model.generate_sentence(input).strip()
-    if prediction is None:
+
+    # 核心：调用带图特征的生成函数
+    prediction_val = model.generate_sentence(input_text, graph_feat=graph_feat).strip()
+
+    # ！！！注意：必须删掉下面这行原有的代码，否则 prediction_val 会被覆盖成不带特征的结果 ！！！
+    # prediction_val = model.generate_sentence(input_text).strip()  <-- 已删除
+    # --------------------------------------------------
+
+    if prediction_val is None:
         return None
+
     result = {
         "id": id,
         "question": question,
-        "prediction": prediction,
+        "prediction": prediction_val,
         "ground_truth": answer,
-        "input": input,
+        "input": input_text,
     }
     return result
 
@@ -180,24 +187,29 @@ def main(args, LLM):
     rule_postfix = "no_rule"
     # Load dataset
     dataset = load_dataset(input_file, split=args.split)
-    # --- 新增：加载并注入图特征 ---
+
+    # --- 确保特征文件加载逻辑正确 ---
     import pickle
-    # 假设你的特征文件路径在 args.rule_path_g1 所在的目录下
+    # 默认尝试从 rule_path_g1 (GNN测试结果) 所在目录寻找特征文件
     feat_path = os.path.join(os.path.dirname(args.rule_path_g1), "all_features.pkl")
 
     if os.path.exists(feat_path):
-        print(f"Loading graph features from {feat_path}...")
+        print(f"[*] Found graph features at: {feat_path}")
         with open(feat_path, 'rb') as f:
             features_dict = pickle.load(f)
 
         def add_feat(example):
             qid = str(example['id'])
             # 拿到 (6, 50) 的特征，没有则补零
+            # 使用列表嵌套确保格式正确
             example['graph_features'] = features_dict.get(qid, [[0.0] * 50] * 6)
             return example
 
+        # 注入特征
         dataset = dataset.map(add_feat)
-        print("Graph features injected into dataset.")
+        print("[*] Graph features successfully injected into dataset.")
+    else:
+        print(f"[!] Warning: Feature file NOT found at {feat_path}")
     # ---------------------------
     if args.add_rule:
         rule_postfix = args.rule_path.replace("/", "_").replace(".", "_")
