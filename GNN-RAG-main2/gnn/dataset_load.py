@@ -863,7 +863,7 @@ def load_data(config, tokenize):
     relation2id = load_dict(config['data_folder'] + config['relation2id'])
 
     if config["is_eval"]:
-        train_data = None
+        train_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="train")
         valid_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="dev")
         test_data = SingleDataLoader(config, word2id, relation2id, entity2id, tokenize, data_type="test")
         num_word = test_data.num_word
