@@ -270,50 +270,25 @@ class ReaRevHGNN(BaseModel):
 
         # ==================== 修改开始：提取 Top-K + Global ====================
 
-        # ==================== 修改开始：提取 Top-K + Global ====================
-        final_graph_sequence = None  # 初始化为 None，防止 training 模式下报错
+        # ==================== 特征提取核心代码 ====================
+        final_graph_sequence = None
 
-        if not training:  # 只有在推理/评估阶段我们需要提取这个向量
-            # 1. 设定 K 值
-            K = 5
-            curr_K = min(K, pred_dist.size(1))
+        if not training:
+            # 1. 融合双通道特征 (拿最后一步的推理结果)
+            h_fusion = self.fusion(gnn_emb, hgnn_emb)
 
-            # 2. 选出 Top-K 索引
-            topk_scores, topk_indices = torch.topk(pred_dist, k=curr_K, dim=1)
+            # 2. 【核心要求】概率加权计算全图特征 (对应论文公式 3.12)
+            # pred_dist 是概率分布 [B, Nodes], h_fusion 是特征 [B, Nodes, Dim]
+            g_global = torch.sum(h_fusion * pred_dist.unsqueeze(-1), dim=1, keepdim=True)
 
-            # 3. 提取 Top-K 实体的语义向量
-            dim = self.local_entity_emb.size(-1)
-            expanded_indices = topk_indices.unsqueeze(-1).expand(-1, -1, dim)
-            topk_node_vecs = torch.gather(self.local_entity_emb, 1, expanded_indices)
+            # 3. 提取 Top-5 关键实体特征
+            _, topk_indices = torch.topk(pred_dist, k=5, dim=1)
+            dim = h_fusion.size(-1)
+            topk_node_vecs = torch.gather(h_fusion, 1, topk_indices.unsqueeze(-1).expand(-1, -1, dim))
 
-            # 4. 处理全局向量 (Global Rep)
-            if 'global_rep' in locals() and global_rep is not None:
-                global_vec = global_rep.unsqueeze(1)
-            else:
-                global_vec = torch.zeros(batch_size, 1, dim).to(self.device)
-
-            # ================== 【关键修复】维度强制对齐 ==================
-            # 解决 RuntimeError: Tensors must have same number of dimensions
-
-            # 1. 检查 topk_node_vecs 是否多了一维 (例如 [B, 1, K, D])
-            if topk_node_vecs.dim() == 4:
-                topk_node_vecs = topk_node_vecs.squeeze(1)
-
-            # 2. 检查 global_vec
-            if global_vec.dim() == 4:
-                global_vec = global_vec.squeeze(1)
-
-            # 3. 确保 global_vec 是 3 维 [Batch, 1, Dim]
-            if global_vec.dim() == 2:
-                global_vec = global_vec.unsqueeze(1)
-            # ============================================================
-
-            # 5. 拼接
-            final_graph_sequence = torch.cat([global_vec, topk_node_vecs], dim=1)
-
-            # 6. Detach
-            final_graph_sequence = final_graph_sequence.detach().cpu()
-        # ==================== 修改结束 ====================
+            # 4. 拼接成软提示序列 [Batch, 1+5, Dim]
+            final_graph_sequence = torch.cat([g_global, topk_node_vecs], dim=1).detach().cpu()
+        # =========================================================
 
         pred = torch.max(pred_dist, dim=1)[1]
         if training:

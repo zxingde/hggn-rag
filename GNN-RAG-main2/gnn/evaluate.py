@@ -137,7 +137,7 @@ class Evaluator:
 
     def evaluate(self, valid_data, test_batch_size=20, write_info=False):
         graph_data_store = {}
-
+        all_graph_features = {}
 
         write_info = True
         self.model.eval()
@@ -159,6 +159,11 @@ class Evaluator:
             batch = valid_data.get_batch(iteration, test_batch_size, fact_dropout=0.0, test=True)
             with torch.no_grad():
                 loss, extras, pred_dist, tp_list, graph_seq = self.model(batch[:-1])
+                q_ids = batch[6]
+                if graph_seq is not None:
+                    for i, q_id in enumerate(q_ids):
+                        # 将 ID 转为字符串做 Key，确保解析时不出错
+                        all_graph_features[str(q_id)] = graph_seq[i].cpu()
                 pred = torch.max(pred_dist, dim=1)[1]
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
@@ -257,6 +262,14 @@ class Evaluator:
         print('avg_f1', np.mean(f1s))
         print('avg_precision', np.mean(precisions))
         print('avg_recall', np.mean(recalls))
+
+        if save_path:
+            import pickle
+            feature_file = save_path + "_graph_features.pkl"
+            with open(feature_file, 'wb') as f:
+                pickle.dump(all_graph_features, f)
+            print(f"特征已保存至: {feature_file}")
+
 
         print(case_ct)
         if write_info:
