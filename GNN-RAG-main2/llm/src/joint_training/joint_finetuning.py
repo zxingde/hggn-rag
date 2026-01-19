@@ -26,6 +26,52 @@ from peft import AutoPeftModelForCausalLM, LoraConfig
 import datasets
 datasets.disable_progress_bar()
 
+import torch.nn as nn
+
+
+class GraphLLMForTraining(nn.Module):
+    def __init__(self, base_model, projector):
+        super().__init__()
+        self.base_model = base_model  # 这里的 base_model 是加载了 LoRA 的 Llama
+        self.projector = projector
+
+    def forward(self, input_ids, attention_mask, labels=None, graph_features=None, **kwargs):
+        # 1. 将文本 ID 转为 Embedding
+        inputs_embeds = self.base_model.get_input_embeddings()(input_ids)
+
+        # 2. 如果有图特征，进行注入
+        if graph_features is not None:
+            # 投影：[Batch, 6, 50] -> [Batch, 6, 4096]
+            projected_feat = self.projector(graph_features.to(self.base_model.dtype))
+
+            # 拼接：放在文本前面 [Batch, 6 + Seq_Len, 4096]
+            inputs_embeds = torch.cat([projected_feat, inputs_embeds], dim=1)
+
+            # 扩展 Attention Mask：为前面的 6 个向量补 1
+            batch_size = attention_mask.shape[0]
+            prefix_mask = torch.ones((batch_size, 6), device=attention_mask.device, dtype=attention_mask.dtype)
+            attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+
+            # 扩展 Labels：如果是在训练，labels 也要补 -100（表示这 6 个位置不计算 loss）
+            if labels is not None:
+                prefix_labels = torch.full((batch_size, 6), -100, device=labels.device, dtype=labels.long())
+                labels = torch.cat([prefix_labels, labels], dim=1)
+
+        # 3. 调用原模型的 forward，注意这次传入的是 inputs_embeds
+        return self.base_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+            **kwargs
+        )
+
+    # 为了让 Trainer 能访问到 base_model 的属性（如 config）
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_model, name)
+
 N_CPUS = int(os.environ['SLURM_CPUS_PER_TASK']) if 'SLURM_CPUS_PER_TASK' in os.environ else 1
 
 INSTRUCTION = """Please generate a valid relation path that can be helpful for answering the following question: """
@@ -74,6 +120,11 @@ class ScriptArguments:
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout."})
     lora_target_modules: str = field(default="q_proj,v_proj",
                                      metadata={"help": "Comma separated list of target modules."})
+    # --- 新增下面这个参数 ---
+    graph_feat_path: Optional[str] = field(
+        default=None, metadata={"help": "Path to the graph features .pkl file."}
+    )
+    # -----------------------
 
 @dataclass
 class ScriptTrainingArguments(TrainingArguments):
@@ -120,7 +171,16 @@ def train():
             bias="none",
             task_type="CAUSAL_LM",
         )
+        # --- 修改：封装模型 ---
+        # 先让 PEFT 处理基础模型（这会加上 LoRA 层）
+        if script_args.use_peft:
+            from peft import get_peft_model
+            model = get_peft_model(model, peft_config)
+            model.print_trainable_parameters()
 
+        # 再套上我们的图特征注入外壳
+        model = GraphLLMForTraining(model, projector)
+        # -----------------------
     tokenizer = AutoTokenizer.from_pretrained(
         script_args.model_name_or_path,
         trust_remote_code=True,
@@ -137,9 +197,24 @@ def train():
     smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokenizer, model)
     
     tokenizer.padding_side = "right"  # Fix weird overflow issue with fp16 training
-    
+
+    # --- 新增：初始化投影层 ---
+    # 维度要与你的 GNN 特征 (50) 和 Llama 隐藏层 (model.config.hidden_size) 对齐
+    from models import GraphProjector  # 确保能引用到你写的类
+    projector = GraphProjector(gnn_dim=50, llm_dim=model.config.hidden_size)
+    projector.to(model.device).to(model.dtype)
+
+    # 显式开启投影层的梯度，确保它会被训练
+    for param in projector.parameters():
+        param.requires_grad = True
+    # -----------------------
+
     # Load datasets
-    train_dataset = load_multiple_datasets(script_args.data_path_list, shuffle=True)
+    train_dataset = load_multiple_datasets(
+        script_args.data_path_list,
+        graph_feat_path=script_args.graph_feat_path,  # 传入刚才定义的路径
+        shuffle=True
+    )
 
     # Prepare instruct tuning
     response_template = "[/INST]"
@@ -185,7 +260,22 @@ def train():
         checkpoint = last_checkpoint
         
     trainer.train(resume_from_checkpoint=checkpoint)
+    # --- 修改保存逻辑 ---
+    print(f"Saving model to {training_args.output_dir}")
 
+    # 1. 保存投影层参数 (这是我们自定义的部分)
+    # 注意：此时的 trainer.model 是 GraphLLMForTraining 包装类
+    projector_save_path = os.path.join(training_args.output_dir, "graph_projector.bin")
+    torch.save(trainer.model.projector.state_dict(), projector_save_path)
+
+    # 2. 保存 LoRA 参数和 Tokenizer
+    if script_args.use_peft:
+        # 因为我们套了外壳，所以要通过 .base_model 访问真正的 PEFT 模型
+        trainer.model.base_model.save_pretrained(training_args.output_dir)
+        tokenizer.save_pretrained(training_args.output_dir)
+    else:
+        trainer.save_model(training_args.output_dir)
+    # -------------------
     if script_args.use_peft:
         trainer.model.save_pretrained(training_args.output_dir)
         tokenizer.save_pretrained(training_args.output_dir)

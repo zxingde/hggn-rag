@@ -158,6 +158,10 @@ def prediction(data, processed_list, input_builder, model, encrypt=False, data_f
         }
     
     input = input_builder.process_input(data)
+    # --- 修改：从 data 中取出特征并传给模型 ---
+    graph_feat = data.get('graph_features', None)
+    prediction = model.generate_sentence(input, graph_feat=graph_feat).strip()
+    # ---------------------------------------
     prediction = model.generate_sentence(input).strip()
     if prediction is None:
         return None
@@ -176,6 +180,25 @@ def main(args, LLM):
     rule_postfix = "no_rule"
     # Load dataset
     dataset = load_dataset(input_file, split=args.split)
+    # --- 新增：加载并注入图特征 ---
+    import pickle
+    # 假设你的特征文件路径在 args.rule_path_g1 所在的目录下
+    feat_path = os.path.join(os.path.dirname(args.rule_path_g1), "all_features.pkl")
+
+    if os.path.exists(feat_path):
+        print(f"Loading graph features from {feat_path}...")
+        with open(feat_path, 'rb') as f:
+            features_dict = pickle.load(f)
+
+        def add_feat(example):
+            qid = str(example['id'])
+            # 拿到 (6, 50) 的特征，没有则补零
+            example['graph_features'] = features_dict.get(qid, [[0.0] * 50] * 6)
+            return example
+
+        dataset = dataset.map(add_feat)
+        print("Graph features injected into dataset.")
+    # ---------------------------
     if args.add_rule:
         rule_postfix = args.rule_path.replace("/", "_").replace(".", "_")
         rule_dataset = utils.load_jsonl(args.rule_path)
