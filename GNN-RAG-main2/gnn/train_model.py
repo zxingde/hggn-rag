@@ -214,17 +214,20 @@ class Trainer_KBQA(object):
         if filename is not None:
             self.load_ckpt(filename)
 
-        # 1. 为训练集生成特征 (微调 LLM 必须) [cite: 6]
-        self.logger.info("Generating features for TRAIN data...")
+        # 依次运行三个集合，特征会自动汇总到 self.evaluator.all_graph_features
+        print("Starting extraction for TRAIN set...")
         self.evaluate(self.train_data, self.test_batch_size, write_info=False)
-
-        # 2. 为验证集生成特征
-        self.logger.info("Generating features for VALID data...")
+        print("Starting extraction for VALID set...")
         self.evaluate(self.valid_data, self.test_batch_size, write_info=False)
-
-        # 3. 为测试集生成特征
-        self.logger.info("Generating features for TEST data...")
+        print("Starting extraction for TEST set...")
         self.evaluate(self.test_data, self.test_batch_size, write_info=True)
+
+        # --- 统一在这里执行一次性保存 ---
+        import pickle
+        save_path = os.path.join(self.args['checkpoint_dir'], f"{self.args['experiment_name']}_all_features.pkl")
+        with open(save_path, 'wb') as f:
+            pickle.dump(self.evaluator.all_graph_features, f)
+        print(f"✅ 恭喜！全量数据集特征已成功保存至: {save_path}")
 
     def train_epoch(self):
         self.model.train()

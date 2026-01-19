@@ -73,6 +73,7 @@ class Evaluator:
         self.args = args
         self.eps = args['eps']
         self.model_name = args["model_name"]
+        self.all_graph_features = {}
 
         id2entity = {idx: entity for entity, idx in entity2id.items()}
         self.id2entity = id2entity
@@ -137,7 +138,6 @@ class Evaluator:
 
     def evaluate(self, valid_data, test_batch_size=20, write_info=False):
         graph_data_store = {}
-        all_graph_features = {}
 
         write_info = True
         self.model.eval()
@@ -163,7 +163,8 @@ class Evaluator:
                 if graph_seq is not None:
                     for i, q_id in enumerate(q_ids):
                         # 将 ID 转为字符串做 Key，确保解析时不出错
-                        all_graph_features[str(q_id)] = graph_seq[i].cpu()
+                        real_qid = q_id if isinstance(q_id, str) else q_id[0]
+                        self.all_graph_features[str(real_qid)] = graph_seq[i].cpu()  #
                 pred = torch.max(pred_dist, dim=1)[1]
             if self.model_name == 'GraftNet':
                 local_entity, query_entities, _, _, query_text, _, \
@@ -262,13 +263,6 @@ class Evaluator:
         print('avg_f1', np.mean(f1s))
         print('avg_precision', np.mean(precisions))
         print('avg_recall', np.mean(recalls))
-
-        save_name = os.path.join(self.args['checkpoint_dir'], f"{self.args['experiment_name']}_graph_features.pkl")
-        with open(save_name, 'wb') as f:
-            pickle.dump(self.all_graph_features, f)
-        print(f"所有数据集特征已保存至: {save_name}")
-
-
         print(case_ct)
         if write_info:
             self.file_write.close()
