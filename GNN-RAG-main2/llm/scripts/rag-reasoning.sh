@@ -1,7 +1,7 @@
 
 SPLIT="test"
 DATASET_LIST="RoG-webqsp"
-MODEL_NAME=RoG
+MODEL_NAME="RoG_Joint_Merged"
 PROMPT_PATH=prompts/llama2_predict.txt
 BEAM_LIST="3" # "1 2 3 4 5"
 
@@ -9,7 +9,7 @@ BEAM_LIST="3" # "1 2 3 4 5"
 for DATA_NAME in $DATASET_LIST; do
     for N_BEAM in $BEAM_LIST; do
         RULE_PATH=results/gen_rule_path/${DATA_NAME}/${MODEL_NAME}/test/predictions_${N_BEAM}_False.jsonl
-        RULE_PATH_G1=results/gnn/${DATA_NAME}/rearev-sbert/test.info
+        RULE_PATH_G1=results/gnn/${DATA_NAME}/rearev-lmsr/test.info
         RULE_PATH_G2=None #results/gnn/${DATA_NAME}/rearev-lmsr/test.info
 
         # no rog
@@ -20,8 +20,8 @@ for DATA_NAME in $DATASET_LIST; do
             --rule_path ${RULE_PATH} \
             --rule_path_g1 ${RULE_PATH_G1} \
             --rule_path_g2 ${RULE_PATH_G2} \
-            --model_path rmanluo/RoG \
-            --predict_path results/KGQA-GNN-RAG/rearev-sbert
+            --model_path "save_models/RoG_Joint_Merged" \
+            --predict_path results/KGQA-GNN-RAG/rearev-lmsr2
     done
 done
 
