@@ -213,10 +213,18 @@ class Trainer_KBQA(object):
     def evaluate_single(self, filename):
         if filename is not None:
             self.load_ckpt(filename)
-        eval_f1, eval_hits, eval_ems = self.evaluate(self.valid_data, self.test_batch_size, write_info=False)
-        self.logger.info("EVAL F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(eval_f1, eval_hits, eval_ems))
-        test_f1, test_hits, test_ems = self.evaluate(self.test_data, self.test_batch_size, write_info=True)
-        self.logger.info("TEST F1: {:.4f}, H1: {:.4f}, EM {:.4f}".format(test_f1, test_hits, test_ems))
+
+        # 1. 为训练集生成特征 (微调 LLM 必须) [cite: 6]
+        self.logger.info("Generating features for TRAIN data...")
+        self.evaluate(self.train_data, self.test_batch_size, write_info=False)
+
+        # 2. 为验证集生成特征
+        self.logger.info("Generating features for VALID data...")
+        self.evaluate(self.valid_data, self.test_batch_size, write_info=False)
+
+        # 3. 为测试集生成特征
+        self.logger.info("Generating features for TEST data...")
+        self.evaluate(self.test_data, self.test_batch_size, write_info=True)
 
     def train_epoch(self):
         self.model.train()

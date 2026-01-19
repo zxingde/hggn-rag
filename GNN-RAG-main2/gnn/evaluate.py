@@ -263,12 +263,10 @@ class Evaluator:
         print('avg_precision', np.mean(precisions))
         print('avg_recall', np.mean(recalls))
 
-        if save_path:
-            import pickle
-            feature_file = save_path + "_graph_features.pkl"
-            with open(feature_file, 'wb') as f:
-                pickle.dump(all_graph_features, f)
-            print(f"特征已保存至: {feature_file}")
+        save_name = os.path.join(self.args['checkpoint_dir'], f"{self.args['experiment_name']}_graph_features.pkl")
+        with open(save_name, 'wb') as f:
+            pickle.dump(self.all_graph_features, f)
+        print(f"所有数据集特征已保存至: {save_name}")
 
 
         print(case_ct)
