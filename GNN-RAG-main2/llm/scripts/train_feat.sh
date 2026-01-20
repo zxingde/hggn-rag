@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=1,2,3
 # 1. 设置模型路径
 MODEL_PATH="NousResearch/Llama-2-7b-chat-hf"
 
@@ -17,7 +17,7 @@ SAVE_PATH="save_models/${SAVE_NAME}"
 ADD_REL=False
 
 # 5. 启动命令
-accelerate launch  --num_processes 1 --mixed_precision "bf16" src/joint_training/joint_finetuning.py \
+accelerate launch --multi_gpu --num_processes 3 --mixed_precision "bf16" src/joint_training/joint_finetuning.py \
     --data_path_list ${DATASET_LIST}  \
     --graph_feat_path ${GRAPH_FEAT_PATH} \
     --model_name_or_path ${MODEL_PATH} \
@@ -29,9 +29,9 @@ accelerate launch  --num_processes 1 --mixed_precision "bf16" src/joint_training
     --lora_alpha 16 \
     --lora_target_modules "q_proj,v_proj" \
     --num_train_epochs 3 \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 8 \
-    --gradient_accumulation_steps 8 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 4 \
+    --gradient_accumulation_steps 5 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -44,7 +44,6 @@ accelerate launch  --num_processes 1 --mixed_precision "bf16" src/joint_training
     --tf32 True \
     --gradient_checkpointing True \
     --run_name ${SAVE_NAME} \
-    --max_steps 10 \
     --remove_unused_columns False \
-    --report_to "none"
+    --report_to "wandb"
 
