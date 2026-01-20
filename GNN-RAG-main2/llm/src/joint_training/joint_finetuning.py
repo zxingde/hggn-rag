@@ -159,6 +159,7 @@ def train():
 
     # 强制关闭列过滤
     training_args.remove_unused_columns = False
+    training_args.ddp_find_unused_parameters = False
 
     # 1. 加载模型
     model = AutoModelForCausalLM.from_pretrained(
@@ -188,6 +189,9 @@ def train():
 
     # 4. 配置 LoRA
     if script_args.use_peft:
+        model.enable_input_require_grads()
+        if training_args.gradient_checkpointing:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if isinstance(script_args.lora_target_modules, str):
             targets = script_args.lora_target_modules.split(",")
         else:
