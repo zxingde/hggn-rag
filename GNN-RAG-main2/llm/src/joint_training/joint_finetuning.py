@@ -5,6 +5,7 @@ import torch.nn as nn
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any
 import logging
+import transformers
 
 from transformers import (
     AutoModelForCausalLM,
@@ -17,9 +18,41 @@ from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
 # 修正导入路径
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
+# 哪怕 utils 里没有，我们下面自己定义了，所以这里导入 utils 也没事
 from utils import *
 from align_kg.data_loader import load_multiple_datasets, load_new_tokens
 from project.GraphProjector import GraphProjector
+
+
+
+# --- 0. 【补全缺失函数】Token 调整函数 ---
+def smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokenizer, model):
+    """
+    调整 tokenizer 和 embedding 大小以适应新 token。
+    这个函数之前在 utils 里缺失，导致 NameError。
+    """
+    # 1. 添加普通新 Token (如 <SEP>, <PATH>)
+    if len(new_tokens) > 0:
+        tokenizer.add_tokens(new_tokens, special_tokens=True)
+
+    # 2. 添加特殊 Token (如 PAD)
+    if len(special_tokens_dict) > 0:
+        tokenizer.add_special_tokens(special_tokens_dict)
+
+    # 3. 调整模型 Embedding 层大小
+    if len(tokenizer) > model.get_input_embeddings().weight.shape[0]:
+        print(f"Resizing token embeddings from {model.get_input_embeddings().weight.shape[0]} to {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
+
+        # 可选：初始化新 Token 的 Embedding 为均值，加速收敛
+        input_embeddings = model.get_input_embeddings().weight.data
+        output_embeddings = model.get_output_embeddings().weight.data
+
+        input_embeddings_avg = input_embeddings[:-len(new_tokens)].mean(dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:-len(new_tokens)].mean(dim=0, keepdim=True)
+
+        input_embeddings[-len(new_tokens):] = input_embeddings_avg
+        output_embeddings[-len(new_tokens):] = output_embeddings_avg
 
 
 # --- 1. 模型包装类 (保持不变) ---
@@ -62,7 +95,7 @@ class GraphLLMForTraining(nn.Module):
             return getattr(self.base_model, name)
 
 
-# --- 2. 新增：自定义 Collator (解决报错的核心) ---
+# --- 2. 自定义 Collator (修复 ValueError 的核心) ---
 class GraphDataCollator:
     def __init__(self, base_collator):
         self.base_collator = base_collator
@@ -80,7 +113,7 @@ class GraphDataCollator:
             graph_features_batch.append(gf)
 
             # B. 过滤掉导致报错的非 Tensor 列 (text, id, 等)
-            # 只保留 base_collator 能处理的字段
+            # 这里的 input_ids 是 SFTTrainer 已经 tokenize 好的
             new_feature = {
                 k: v for k, v in feature.items()
                 if k in ['input_ids', 'attention_mask', 'labels']
@@ -127,26 +160,30 @@ def train():
     # 强制关闭列过滤
     training_args.remove_unused_columns = False
 
-    # 1. 加载模型 (去掉了 device_map="auto")
+    # 1. 加载模型
     model = AutoModelForCausalLM.from_pretrained(
         script_args.model_name_or_path,
         torch_dtype=torch.bfloat16,
     )
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path, use_fast=False)
-    tokenizer.pad_token = tokenizer.eos_token  # Llama2 需要指定 pad_token
+    tokenizer.pad_token = tokenizer.eos_token
 
     # 2. 初始化投影层
+    print(f"Initializing GraphProjector: 50 -> {model.config.hidden_size}")
     projector = GraphProjector(gnn_dim=50, llm_dim=model.config.hidden_size)
     projector.to(model.device).to(model.dtype)
     for param in projector.parameters():
         param.requires_grad = True
 
-    # 3. 处理 Token
+    # 3. 处理 Token (调用我们刚才手动补全的函数)
     special_tokens_dict = dict()
     if tokenizer.pad_token is None: special_tokens_dict['pad_token'] = '<PAD>'
     new_tokens = ['<SEP>', '<PATH>', '</PATH>']
     if script_args.add_rel_token:
+        # load_new_tokens 已经在 data_loader 里修复并导入了
         new_tokens = load_new_tokens(new_tokens, script_args.rel_dict_path)
+
+    print("Resizing tokens...")
     smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokenizer, model)
 
     # 4. 配置 LoRA
@@ -166,6 +203,7 @@ def train():
     model = GraphLLMForTraining(model, projector)
 
     # 6. 加载数据
+    print("Loading datasets...")
     train_dataset = load_multiple_datasets(
         script_args.data_path_list,
         graph_feat_path=script_args.graph_feat_path,
@@ -173,9 +211,7 @@ def train():
     )
 
     # 7. 组装 Data Collator
-    # 先创建基础的 Collator (负责 Masking)
     base_collator = DataCollatorForCompletionOnlyLM("[/INST]", tokenizer=tokenizer)
-    # 再套上我们的 Graph 过滤器
     graph_collator = GraphDataCollator(base_collator)
 
     # 8. Trainer
@@ -186,9 +222,10 @@ def train():
         tokenizer=tokenizer,
         args=training_args,
         dataset_text_field="text",
-        data_collator=graph_collator,  # 使用自定义的 collator
+        data_collator=graph_collator,
     )
 
+    print("Starting training...")
     trainer.train()
 
     # 9. 保存结果
