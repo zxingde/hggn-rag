@@ -18,18 +18,17 @@ from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
 # 修正导入路径
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
-# 哪怕 utils 里没有，我们下面自己定义了，所以这里导入 utils 也没事
 from utils import *
 from align_kg.data_loader import load_multiple_datasets, load_new_tokens
 from project.GraphProjector import GraphProjector
 
 
-
-# --- 0. 【补全缺失函数】Token 调整函数 ---
+# ==============================================================================
+#  【核心修复】手动补全缺失的 Tokenizer 调整函数
+# ==============================================================================
 def smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokenizer, model):
     """
     调整 tokenizer 和 embedding 大小以适应新 token。
-    这个函数之前在 utils 里缺失，导致 NameError。
     """
     # 1. 添加普通新 Token (如 <SEP>, <PATH>)
     if len(new_tokens) > 0:
@@ -44,7 +43,7 @@ def smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokeni
         print(f"Resizing token embeddings from {model.get_input_embeddings().weight.shape[0]} to {len(tokenizer)}")
         model.resize_token_embeddings(len(tokenizer))
 
-        # 可选：初始化新 Token 的 Embedding 为均值，加速收敛
+        # 初始化新 Token 的 Embedding 为均值，加速收敛
         input_embeddings = model.get_input_embeddings().weight.data
         output_embeddings = model.get_output_embeddings().weight.data
 
@@ -55,7 +54,9 @@ def smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokeni
         output_embeddings[-len(new_tokens):] = output_embeddings_avg
 
 
-# --- 1. 模型包装类 (保持不变) ---
+# ==============================================================================
+
+# --- 1. 模型包装类 ---
 class GraphLLMForTraining(nn.Module):
     def __init__(self, base_model, projector):
         super().__init__()
@@ -78,7 +79,8 @@ class GraphLLMForTraining(nn.Module):
             attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
 
             if labels is not None:
-                prefix_labels = torch.full((batch_size, 6), -100, device=labels.device, dtype=labels.long())
+                # 【核心修复】这里把 labels.long() 改成了 torch.long
+                prefix_labels = torch.full((batch_size, 6), -100, device=labels.device, dtype=torch.long)
                 labels = torch.cat([prefix_labels, labels], dim=1)
 
         return self.base_model(
@@ -113,7 +115,6 @@ class GraphDataCollator:
             graph_features_batch.append(gf)
 
             # B. 过滤掉导致报错的非 Tensor 列 (text, id, 等)
-            # 这里的 input_ids 是 SFTTrainer 已经 tokenize 好的
             new_feature = {
                 k: v for k, v in feature.items()
                 if k in ['input_ids', 'attention_mask', 'labels']
@@ -175,15 +176,15 @@ def train():
     for param in projector.parameters():
         param.requires_grad = True
 
-    # 3. 处理 Token (调用我们刚才手动补全的函数)
+    # 3. 处理 Token
     special_tokens_dict = dict()
     if tokenizer.pad_token is None: special_tokens_dict['pad_token'] = '<PAD>'
     new_tokens = ['<SEP>', '<PATH>', '</PATH>']
     if script_args.add_rel_token:
-        # load_new_tokens 已经在 data_loader 里修复并导入了
         new_tokens = load_new_tokens(new_tokens, script_args.rel_dict_path)
 
     print("Resizing tokens...")
+    # 现在这个函数已经在文件里定义了，可以直接调用
     smart_tokenizer_and_embedding_resize(new_tokens, special_tokens_dict, tokenizer, model)
 
     # 4. 配置 LoRA

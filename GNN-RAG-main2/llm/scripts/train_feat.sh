@@ -1,5 +1,6 @@
 #!/bin/bash
 
+export CUDA_VISIBLE_DEVICES=3
 # 1. 设置模型路径
 MODEL_PATH="NousResearch/Llama-2-7b-chat-hf"
 
