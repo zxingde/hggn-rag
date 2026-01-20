@@ -1,67 +1,96 @@
 import string
 import sys
 import os
+import pickle
+import torch
+import numpy as np
+from datasets import load_dataset, concatenate_datasets, Dataset
+
+# 将父目录加入路径，以便导入 utils
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
 
-from datasets import load_dataset, concatenate_datasets, Dataset
-from utils import rule_to_string
-import pickle
-import os
 
 def load_graph_features(feat_path):
-    """
-    专门负责读取你生成的 .pkl 特征文件
-    """
+    """加载 .pkl 特征文件"""
     if feat_path and os.path.exists(feat_path):
+        print(f"Loading graph features from {feat_path}...")
         with open(feat_path, 'rb') as f:
-            # 读取出来的字典：Key 是问题 ID (str)，Value 是 (6, 50) 的特征
             return pickle.load(f)
+    print(f"Warning: Graph feature file not found or path is empty: {feat_path}")
     return {}
 
+
 def load_new_tokens(default_new_tokens, rel_dict_path):
+    """
+    【补回来的函数】加载关系 Token
+    """
     if isinstance(rel_dict_path, str):
         rel_dict_path = [rel_dict_path]
+
+    if rel_dict_path is None:
+        return default_new_tokens
+
     for rel_path in rel_dict_path:
-        with open(rel_path, 'r') as f:
-            for line in f.readlines():
-                _, r = line.strip().split('\t')
-                default_new_tokens.append(r)
+        if os.path.exists(rel_path):
+            with open(rel_path, 'r') as f:
+                for line in f.readlines():
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        _, r = parts
+                        default_new_tokens.append(r)
     return default_new_tokens
-        
 
-def load_multiple_datasets(data_path_list, graph_feat_path=None,shuffle=False):
-    '''
-    Load multiple datasets from different paths.
 
-    Args:
-        data_path_list (_type_): _description_
-        shuffle (bool, optional): _description_. Defaults to False.
+def load_multiple_datasets(data_path_list, graph_feat_path=None, shuffle=True):
+    """
+    加载多个数据集，并注入图特征 (强制转换为 List[float] 以解决类型冲突)
+    """
+    # 1. 加载图特征字典
+    features_dict = load_graph_features(graph_feat_path)
 
-    Returns:
-        _type_: _description_
-    '''
-    # 1. 先加载图特征小抄 (调用你刚才写好的函数)
-    features_dict = load_graph_features(graph_feat_path)  # 新增
     all_datasets = []
-
     for data_path in data_path_list:
-        # 加载原始 json 数据
+        print(f"Loading dataset: {data_path}")
         dataset = load_dataset('json', data_files=data_path, split='train')
 
-        # 2. 定义一个内部函数，告诉 Git 怎么把特征塞进每一行数据
-        def add_graph_features(example):  # 新增
-            qid = str(example['id'])  # 确保 ID 是字符串，好去字典里找
-            # 如果字典里有这个 ID，就拿出来；没有就给全 0 向量
-            if qid in features_dict:
-                feat = features_dict[qid]
+        # 2. 定义映射函数
+        def add_graph_features(example):
+            qid = None
+            # 兼容多种 ID 写法
+            if 'id' in example:
+                qid = str(example['id'])
+            elif 'qid' in example:
+                qid = str(example['qid'])
+
+            # 3. 检索特征并强制转换类型
+            if qid and qid in features_dict:
+                raw_feat = features_dict[qid]
+
+                # 【核心修复】无论原来是 Tensor 还是 Numpy，都转成纯 Python List
+                if isinstance(raw_feat, torch.Tensor):
+                    feat = raw_feat.tolist()
+                elif isinstance(raw_feat, np.ndarray):
+                    feat = raw_feat.tolist()
+                elif isinstance(raw_feat, list):
+                    feat = raw_feat
+                else:
+                    # 兜底：如果是未知类型但支持 tolist
+                    if hasattr(raw_feat, 'tolist'):
+                        feat = raw_feat.tolist()
+                    else:
+                        feat = raw_feat
             else:
-                import torch
-                feat = torch.zeros(6, 50).tolist()  # 兜底逻辑：没找到就给 6x50 的 0
+                # 没找到 ID，补全 0 (List[float64])
+                feat = [[0.0] * 50 for _ in range(6)]
+
             return {'graph_features': feat}
 
-        # 3. 使用 map 功能，给数据集增加一列叫 'graph_features'
-        dataset = dataset.map(add_graph_features)  # 新增
+        # 4. 使用 map 功能注入特征
+        dataset = dataset.map(add_graph_features)
         all_datasets.append(dataset)
+
+    # 5. 合并数据集
+    print("Concatenating datasets...")
     dataset = concatenate_datasets(all_datasets)
     if shuffle:
         dataset = dataset.shuffle()
