@@ -4,126 +4,146 @@ import json
 import torch
 import pickle
 import argparse
+import math
+import torch.nn.functional as F
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, LlamaTokenizer
 from peft import PeftModel
 
-# --- 路径修正，确保能导入项目模块 ---
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from project.GraphProjector import GraphProjector
 
+INSTRUCTION = "Please generate a valid relation path that can be helpful for answering the following question: "
+PROMPT_TEMPLATE = "[INST] <<SYS>>\n<</SYS>>\n{instruction}{input} [/INST]"
 
 
 def load_graph_features(feat_path):
     print(f"Loading graph features from {feat_path}...")
     with open(feat_path, 'rb') as f:
         features = pickle.load(f)
-    print(f"Loaded {len(features)} features.")
     return features
 
 
+def batch_iterator(data, batch_size):
+    for i in range(0, len(data), batch_size):
+        yield data[i:i + batch_size]
+
+
 def main(args):
-    # 1. 加载 Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # 1. Tokenizer
+    print(f"Loading Tokenizer...")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.lora_path, use_fast=False)
+    except:
+        tokenizer = LlamaTokenizer.from_pretrained(args.model_name_or_path, use_fast=False)
+        tokenizer.add_tokens(["<SEP>", "<PATH>", "</PATH>"], special_tokens=True)
+        if tokenizer.pad_token is None: tokenizer.add_special_tokens({'pad_token': '<PAD>'})
+    tokenizer.padding_side = "left"
 
-    # 2. 加载 Base Model
-    print("Loading Base Model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto"
-    )
-
-    # 3. 加载 LoRA
+    # 2. Model
+    print(f"Loading Model...")
+    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=torch.bfloat16, device_map="auto")
+    model.resize_token_embeddings(len(tokenizer))
     if args.use_peft:
-        print(f"Loading LoRA adapters from {args.lora_path}...")
         model = PeftModel.from_pretrained(model, args.lora_path)
 
-    # 4. 加载 Graph Projector
-    print(f"Loading Graph Projector from {args.lora_path}/graph_projector.bin ...")
+    # 3. Projector
+    print("Loading Graph Projector...")
     projector = GraphProjector(gnn_dim=50, llm_dim=model.config.hidden_size)
-    projector_path = os.path.join(args.lora_path, "graph_projector.bin")
-    if os.path.exists(projector_path):
-        projector.load_state_dict(torch.load(projector_path, map_location=model.device))
-    else:
-        raise FileNotFoundError(f"Projector file not found at {projector_path}")
-
-    projector.to(model.device).to(model.dtype)
-    projector.eval()
+    projector.load_state_dict(
+        torch.load(os.path.join(args.lora_path, "graph_projector.bin"), map_location=model.device))
+    projector.to(model.device).to(model.dtype).eval()
     model.eval()
 
-    # 5. 加载数据
-    graph_features_dict = load_graph_features(args.graph_feat_path)
+    # 4. Data
+    graph_features_dict = {}
+    if not args.ignore_graph:
+        graph_features_dict = load_graph_features(args.graph_feat_path)
 
     with open(args.test_path, 'r') as f:
-        test_data = [json.loads(line) for line in f]
+        all_data = [json.loads(line) for line in f]
+    if args.max_samples > 0: all_data = all_data[:args.max_samples]
 
-    # 6. 推理循环
+    shard_size = math.ceil(len(all_data) / args.num_shards)
+    test_data = all_data[args.shard_id * shard_size: min((args.shard_id + 1) * shard_size, len(all_data))]
+
     results = []
-    print(f"Start Inference on {len(test_data)} examples...")
+    debug_printed = False
+
+    print(f"�� Worker {args.shard_id} Start: {len(test_data)} samples")
 
     with torch.no_grad():
-        for item in tqdm(test_data):
-            qid = item['id']
-            question = item['question']  # 或者是 item['text']，取决于数据格式
+        for batch in tqdm(batch_iterator(test_data, args.batch_size), desc=f"GPU {args.shard_id}"):
+            batch_prompts = []
+            batch_feat_tensors = []
+            batch_ids = []
 
-            # 构造 Prompt (Align 任务)
-            # 注意：这里的 Prompt 格式必须和你训练 align 任务时的一模一样！
-            # 假设训练时是： "Question: {q}\nAnswer:"
-            prompt = f"Question: {question}\nAnswer:"
+            for item in batch:
+                qid = item['id']
+                batch_ids.append(qid)
+                batch_prompts.append(PROMPT_TEMPLATE.format(instruction=INSTRUCTION, input=item['question']))
 
-            # 获取图特征
-            if qid in graph_features_dict:
-                # [6, 50]
-                feat_tensor = torch.tensor(graph_features_dict[qid], dtype=model.dtype, device=model.device)
-                # 投影 -> [1, 6, 4096]
-                projected_feat = projector(feat_tensor).unsqueeze(0)
-            else:
-                # 兜底：如果没有特征，用全0
-                print(f"Warning: No feature for {qid}")
-                feat_tensor = torch.zeros((6, 50), dtype=model.dtype, device=model.device)
-                projected_feat = projector(feat_tensor).unsqueeze(0)
+                if (not args.ignore_graph) and (qid in graph_features_dict):
+                    ft = graph_features_dict[qid]
+                    if not isinstance(ft, torch.Tensor): ft = torch.tensor(ft)
+                    ft = ft.to(dtype=model.dtype)
+                else:
+                    ft = torch.zeros((6, 50), dtype=model.dtype)
+                batch_feat_tensors.append(ft)
 
-            # 文本转 Embedding
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            # Tokenize
+            inputs = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(
+                model.device)
+
+            # Projector
+            batch_feat_stack = torch.stack(batch_feat_tensors).to(dtype=model.dtype, device=model.device)
+            projected_feat = projector(batch_feat_stack)
+
+            # Get Text Embeddings
             input_embeds = model.get_input_embeddings()(inputs.input_ids)
 
-            # 【核心步骤】拼接： [图特征, 文本特征]
-            # inputs_embeds shape: [1, seq_len + 6, hidden_dim]
+            # === Auto-Scaling ===
+            if not debug_printed:
+                text_norm = input_embeds.norm(dim=-1).mean().item()
+                graph_norm = projected_feat.norm(dim=-1).mean().item()
+                print(f"�� [SCALE CHECK] Text: {text_norm:.4f} | Graph: {graph_norm:.4f}")
+                debug_printed = True
+
+            # 计算 Scaling
+            current_graph_norm = projected_feat.norm(dim=-1, keepdim=True).mean(dim=1, keepdim=True)
+            text_avg_norm = input_embeds.norm(dim=-1).mean().detach()
+            mask = (current_graph_norm > 1e-6).float()
+
+            # 缩放运算 (这步会自动变成 float32)
+            projected_feat = projected_feat / (current_graph_norm + 1e-6) * text_avg_norm * mask
+
+            # 【关键修复】强制转回 bfloat16
+            projected_feat = projected_feat.to(dtype=model.dtype)
+
+            # Concat
             final_input_embeds = torch.cat([projected_feat, input_embeds], dim=1)
 
-            # 生成
-            generation_output = model.generate(
+            # Mask
+            bs = final_input_embeds.shape[0]
+            graph_mask = torch.ones((bs, projected_feat.shape[1]), device=model.device)
+            final_attention_mask = torch.cat([graph_mask, inputs.attention_mask], dim=1)
+
+            # Generate
+            gen_out = model.generate(
                 inputs_embeds=final_input_embeds,
+                attention_mask=final_attention_mask,
                 max_new_tokens=128,
-                num_beams=args.beam_size,
-                return_dict_in_generate=True,
-                output_scores=True,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                do_sample=False
             )
 
-            # 解码
-            output = generation_output.sequences[0]
-            # 注意：因为我们是传 embedding 进去的，generate 返回的 output 包含了输入的长度吗？
-            # 通常 generate 返回的是 [input + generated] 或者 [generated] 取决于版本
-            # 这里简单处理，解码所有 token，然后截取 output
-            decoded_output = tokenizer.decode(output, skip_special_tokens=True)
+            decoded = tokenizer.batch_decode(gen_out, skip_special_tokens=True)
+            for qid, item, pred in zip(batch_ids, batch, decoded):
+                if "[/INST]" in pred: pred = pred.split("[/INST]")[-1]
+                results.append({"id": qid, "question": item['question'], "prediction": pred.strip()})
 
-            # 保存结果
-            results.append({
-                "id": qid,
-                "question": question,
-                "prediction": decoded_output.strip()
-            })
-
-    # 7. 保存文件
-    print(f"Saving results to {args.output_path}")
-    with open(args.output_path, 'w') as f:
-        for item in results:
-            f.write(json.dumps(item) + "\n")
+    with open(f"{args.output_path}.shard{args.shard_id}", 'w') as f:
+        for item in results: f.write(json.dumps(item) + "\n")
+    print(f"✅ Worker {args.shard_id} Done!")
 
 
 if __name__ == "__main__":
@@ -135,5 +155,10 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--beam_size", type=int, default=1)
     parser.add_argument("--use_peft", type=bool, default=True)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--num_shards", type=int, default=1)
+    parser.add_argument("--shard_id", type=int, default=0)
+    parser.add_argument("--max_samples", type=int, default=-1)
+    parser.add_argument("--ignore_graph", action="store_true")
     args = parser.parse_args()
     main(args)

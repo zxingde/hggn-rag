@@ -1,33 +1,44 @@
 #!/bin/bash
 
-# 使用空闲显卡
-export CUDA_VISIBLE_DEVICES=1
-
+# 基础配置
 BASE_MODEL="NousResearch/Llama-2-7b-chat-hf"
-
-# 【核心修改 1】加上 llm/ 前缀
 LORA_PATH="llm/save_models/RoG_Joint_LoRA_Graph"
-
-# 测试集路径
-# 【核心修改 2】确认 datasets 是否也在 llm 下？如果是，也要加 llm/
-# 假设你的 datasets 文件夹在 llm/datasets/
-TEST_DATA="llm/datasets/joint_training/align/RoG-cwq/test.jsonl"
-
-# 图特征路径
-# 【核心修改 3】同上，加上 llm/
+TEST_DATA="llm/datasets/joint_training/align/RoG-webqsp/test.jsonl"
 GRAPH_FEAT="llm/datasets/feature/0117-HGNN-WebQSP_LMSR_BS24_4090_EXPORT_all_features.pkl"
+OUTPUT_FILE="${LORA_PATH}/RoG_webqsp_test_align_predictions.jsonl"
 
-# 输出文件
-OUTPUT_FILE="${LORA_PATH}/RoG_cwq_test_align_predictions.jsonl"
+echo "�� Starting 3-GPU Distributed Inference (DEBUG: Top 50 samples)..."
 
-echo "Running Step 1: Align Task Inference with Graph Features..."
+run_shard() {
+    GPU_ID=$1
+    SHARD_ID=$2
+    NUM_SHARDS=3
 
-# 注意：这里调用 python 是从根目录调用的，所以前面的参数都要基于根目录
-python llm/src/qa_prediction/gen_rule_path_feat.py \
-    --model_name_or_path ${BASE_MODEL} \
-    --lora_path ${LORA_PATH} \
-    --test_path ${TEST_DATA} \
-    --graph_feat_path ${GRAPH_FEAT} \
-    --output_path ${OUTPUT_FILE} \
-    --beam_size 1 \
-    --use_peft True
+    echo "Starting Worker $SHARD_ID on GPU $GPU_ID..."
+
+    CUDA_VISIBLE_DEVICES=$GPU_ID python llm/src/qa_prediction/gen_rule_path_feat.py \
+        --model_name_or_path ${BASE_MODEL} \
+        --lora_path ${LORA_PATH} \
+        --test_path ${TEST_DATA} \
+        --graph_feat_path ${GRAPH_FEAT} \
+        --output_path ${OUTPUT_FILE} \
+        --beam_size 1 \
+        --use_peft True \
+        --batch_size 16 \
+        --num_shards ${NUM_SHARDS} \
+        --shard_id ${SHARD_ID} \
+        --max_samples 50 \
+        --ignore_graph &
+}
+
+run_shard 0 0
+run_shard 1 1
+run_shard 2 2
+
+wait
+
+echo "✅ All GPUs finished!"
+echo "Merging results..."
+cat ${OUTPUT_FILE}.shard0 ${OUTPUT_FILE}.shard1 ${OUTPUT_FILE}.shard2 > ${OUTPUT_FILE}
+rm ${OUTPUT_FILE}.shard*
+echo "�� Done! Final output: ${OUTPUT_FILE}"
