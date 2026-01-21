@@ -18,7 +18,16 @@ data_list = ['RoG-webqsp', 'RoG-cwq']
 model_name_or_path = "NousResearch/Llama-2-7b-chat-hf"
 prompter = InstructFormater(prompt_path)
 
-INSTRUCTION = """Please generate a valid relation path that can be helpful for answering the following question: """
+INSTRUCTION = """You are a knowledge graph reasoning agent.
+Task: Generate a reasoning path on the knowledge graph that leads to the answer.
+Format: relation1 -> relation2 -> relation3
+Do NOT answer the question directly.
+
+Example:
+Input: who is the director of titanic
+Path: film.film.director -> people.person.name
+
+Input: """
 SEP = '<SEP>'
 BOP = '<PATH>'
 EOP = '</PATH>'
