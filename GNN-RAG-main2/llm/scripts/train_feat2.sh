@@ -1,28 +1,41 @@
 #!/bin/bash
 
-# 指定 GPU
+# 1. 设置模型路径
+MODEL_PATH="NousResearch/Llama-2-7b-chat-hf"
+
+# 2. 设置数据列表 (这里指向你刚生成的 .pkl 文件)
+# 请确保这个路径是你服务器上真实的 pkl 路径
+DATASET_LIST="/home/bi3/zxd_env/GNN-RAG-main2/llm/final_finetune_corpus_webqsp.pkl"
+
+# 3. 设置保存路径
+SAVE_NAME="RoG_WebQSP_GNN_Finetune_Len4096"
+SAVE_PATH="save_models/${SAVE_NAME}"
+ADD_REL=False
+
+# 4. GNN 参数
+GNN_INPUT_DIM=50
+NUM_GRAPH_TOKENS=3
+
+# 5. 启动命令
+# 【核心修改】：在末尾添加了 --model_max_length 4096
+# 建议将 batch_size 调小为 2，防止显存溢出 (OOM)
+
 export CUDA_VISIBLE_DEVICES=1,2,3
 
-# 关键：这里直接写死绝对路径，不要用变量引用了，防止前面定义错
-PKL_PATH="/home/bi3/zxd_env/GNN-RAG-main2/llm/final_finetune_corpus_webqsp.pkl"
-MODEL_PATH="NousResearch/Llama-2-7b-chat-hf"
-OUTPUT_DIR="save_models/RoG_WebQSP_GNN_Finetune_v2"
-
-# 启动命令
 accelerate launch --multi_gpu --num_processes 3 --mixed_precision "bf16" src/joint_training/joint_finetuning.py \
-    --data_path_list "$PKL_PATH"  \
-    --model_name_or_path "$MODEL_PATH" \
-    --output_dir "$OUTPUT_DIR" \
-    --add_rel_token False \
+    --data_path_list ${DATASET_LIST}  \
+    --model_name_or_path ${MODEL_PATH} \
+    --output_dir ${SAVE_PATH} \
+    --add_rel_token ${ADD_REL} \
     --bf16 True \
     --use_peft True \
     --lora_r 8 \
     --lora_alpha 16 \
     --lora_target_modules "q_proj,v_proj" \
     --num_train_epochs 3 \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 8 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 16 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -35,6 +48,7 @@ accelerate launch --multi_gpu --num_processes 3 --mixed_precision "bf16" src/joi
     --tf32 True \
     --report_to "wandb" \
     --gradient_checkpointing True \
-    --run_name "RoG_WebQSP_Run3" \
-    --gnn_input_dim 50 \
-    --num_graph_tokens 3
+    --run_name ${SAVE_NAME} \
+    --gnn_input_dim ${GNN_INPUT_DIM} \
+    --num_graph_tokens ${NUM_GRAPH_TOKENS} \
+    --model_max_length 4096
