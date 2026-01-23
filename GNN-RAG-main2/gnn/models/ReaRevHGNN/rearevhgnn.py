@@ -274,20 +274,26 @@ class ReaRevHGNN(BaseModel):
         final_graph_sequence = None
 
         if not training:
-            # 1. 融合双通道特征 (拿最后一步的推理结果)
-            h_fusion = self.fusion(gnn_emb, hgnn_emb)
+            # # 1. 融合双通道特征 (拿最后一步的推理结果)
+            # h_fusion = self.fusion(gnn_emb, hgnn_emb)
+            #
+            # # 2. 【核心要求】概率加权计算全图特征 (对应论文公式 3.12)
+            # # pred_dist 是概率分布 [B, Nodes], h_fusion 是特征 [B, Nodes, Dim]
+            # g_global = torch.sum(h_fusion * pred_dist.unsqueeze(-1), dim=1, keepdim=True)
+            #
+            # # 3. 提取 Top-5 关键实体特征
+            # _, topk_indices = torch.topk(pred_dist, k=5, dim=1)
+            # dim = h_fusion.size(-1)
+            # topk_node_vecs = torch.gather(h_fusion, 1, topk_indices.unsqueeze(-1).expand(-1, -1, dim))
+            #
+            # # 4. 拼接成软提示序列 [Batch, 1+5, Dim]
+            # final_graph_sequence = torch.cat([g_global, topk_node_vecs], dim=1).detach().cpu()
+            # 1. 融合 GNN 和 HGNN 的特征
+            h_fusion = self.fusion(gnn_emb, hgnn_emb)  # [Batch, Max_Nodes, Dim]
 
-            # 2. 【核心要求】概率加权计算全图特征 (对应论文公式 3.12)
-            # pred_dist 是概率分布 [B, Nodes], h_fusion 是特征 [B, Nodes, Dim]
-            g_global = torch.sum(h_fusion * pred_dist.unsqueeze(-1), dim=1, keepdim=True)
-
-            # 3. 提取 Top-5 关键实体特征
-            _, topk_indices = torch.topk(pred_dist, k=5, dim=1)
-            dim = h_fusion.size(-1)
-            topk_node_vecs = torch.gather(h_fusion, 1, topk_indices.unsqueeze(-1).expand(-1, -1, dim))
-
-            # 4. 拼接成软提示序列 [Batch, 1+5, Dim]
-            final_graph_sequence = torch.cat([g_global, topk_node_vecs], dim=1).detach().cpu()
+            # 2. 这里不需要再做 Top-K 提取了，因为我们要存下所有节点的特征
+            # 这样以后无论路径走到哪个节点，我们在 cache 里都能查到
+            final_graph_sequence = h_fusion
         # =========================================================
 
         pred = torch.max(pred_dist, dim=1)[1]

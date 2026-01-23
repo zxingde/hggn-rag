@@ -177,15 +177,34 @@ class Evaluator:
                     seed_dist, true_batch_id, answer_dist, answer_list = batch
 
             if graph_seq is not None:
-                # graph_seq 已经是 cpu tensor 了
-                current_batch_numpy = graph_seq.numpy()
+                # 1. 必须先转 CPU 再转 Numpy
+                current_batch_numpy = graph_seq.cpu().numpy()
+
+                # 2. 获取对应的 ID 矩阵 (都在 batch[0] 里，也就是 local_entity)
+                # local_entity 形状: [Batch, Max_Nodes], 存的是 Global ID
+                current_batch_ids = local_entity
 
                 for i, qid_obj in enumerate(true_batch_id):
-                    # 处理 ID 格式 (有时候是 tuple/list)
+                    # 处理 ID 格式
                     real_qid = qid_obj if isinstance(qid_obj, str) else qid_obj[0]
+                    real_qid = str(real_qid)  # 强转 string 做 key
 
-                    # 存入字典
-                    graph_data_store[real_qid] = current_batch_numpy[i]
+                    # 获取当前样本的 特征 和 ID
+                    feats = current_batch_numpy[i]  # [Max_Nodes, Dim]
+                    gids = current_batch_ids[i]  # [Max_Nodes]
+
+                    # 3. 组装成字典 {Global_ID: Vector}
+                    node_map = {}
+                    pad_ent_id = len(id2entity)  # 获取 padding 的 ID 值
+
+                    for idx, gid in enumerate(gids):
+                        gid = int(gid)
+                        # 过滤掉 Padding 节点 (通常 Padding ID 是实体总数)
+                        if gid != pad_ent_id:
+                            node_map[gid] = feats[idx]  # 存入字典
+
+                    # 存入大仓库
+                    graph_data_store[real_qid] = node_map
 
             # self.true_batch_id = true_batch_id
             if write_info:

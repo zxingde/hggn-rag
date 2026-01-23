@@ -56,20 +56,39 @@ def formatting_prompts_func(example):
             + output_label + tokenizer.eos_token
     )
 
-    # 【核心修改】这里显式返回 id，确保它不会被 remove_columns 删掉
-    return {"text": output_text, "id": example['id']}
+    # ========================================================
+    # 【核心修改区域】
+    # 必须显式返回 'id'，因为 map 函数设置了 remove_columns
+    # 我建议顺便把原始 'question' 也带上，方便后续人工检查
+    # ========================================================
+    return {
+        "text": output_text,  # 训练用的文本
+        "id": example['id'],  # 【关键】用于对齐 GNN 特征的唯一 ID
+        "question": example['question']  # (可选) 原始问题文本，方便调试
+    }
 
 
 for data_name in data_list:
     input_file = os.path.join(data_path, data_name)
     train_dataset = datasets.load_dataset(input_file, split="train")
+
+    # 确保保存路径存在
     save_path = os.path.join(save_dir, data_name, data_name + "_train.jsonl")
     if not os.path.exists(os.path.dirname(save_path)):
         os.makedirs(os.path.dirname(save_path))
 
+    print(f"Processing {data_name}...")
+
+    # 执行 Map
     train_dataset = train_dataset.map(
         formatting_prompts_func,
-        remove_columns=train_dataset.column_names,  # 虽然这里删除了旧列，但因为函数返回了新的 id，所以 id 会保留
+        # 这里删除了所有未在 formatting_prompts_func 返回的列
+        # 所以上面的 return 必须包含 'id'
+        remove_columns=train_dataset.column_names,
         num_proc=N_CPUS,
     )
+
+    # 保存为 JSONL
+    print(f"Saving to {save_path}...")
     train_dataset.to_json(save_path, orient="records", lines=True)
+    print("Done.")
