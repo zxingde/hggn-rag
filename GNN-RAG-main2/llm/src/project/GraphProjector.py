@@ -42,55 +42,56 @@ class GraphProjector(nn.Module):
         """
         batch_size, max_paths, dim = graph_features.shape
         device = graph_features.device
+        dtype = graph_features.dtype
 
-        # =========================================================
-        # 步骤 1: 识别哪些是有效路径 (非0)
-        # =========================================================
-        # 计算 L2 范数，大于 0 的就是有效数据
-        # [Batch, Max_Paths]
+        # 1. 识别有效路径 (True/False)
         path_norm = torch.norm(graph_features, p=2, dim=-1)
-        is_valid = path_norm > 1e-5  # True=有效, False=0向量
+        is_valid = path_norm > 1e-5
 
-        # =========================================================
-        # 步骤 2: “物理删除”模拟 —— 排序挤压 (Sorting)
-        # =========================================================
-        # 这一步至关重要！它把所有有效数据移到了最前面，0数据被赶到了最后面
-        # 效果等同于：[A, 0, B, 0] -> [A, B, 0, 0]
-        # 这样 Transformer 只会处理前两个，后面会被 Mask 掉
+        # 2. 排序 (Sort)
+        # 【技巧】先转 long 排序(避开CUDA bug)，再转回 bool 给 Transformer 用
+        sorted_mask_int, sorted_indices = torch.sort(is_valid.long(), dim=1, descending=True)
+        sorted_mask_bool = sorted_mask_int.bool()  # True=有效, False=0向量
 
-        sorted_mask, sorted_indices = torch.sort(is_valid, dim=1, descending=True)
-
-        # 根据排序后的索引，重排原始特征
-        # 此时 graph_features 变成了：前半部分全是有效数据，后半部分全是 0
+        # 根据索引重排特征
         expanded_indices = sorted_indices.unsqueeze(-1).expand(-1, -1, dim)
         sorted_features = torch.gather(graph_features, 1, expanded_indices)
 
-        # =========================================================
-        # 步骤 3: MLP 投影
-        # =========================================================
-        # 此时进去的 sorted_features，前面已经是紧凑的有效向量了
+        # 3. MLP
         projected_features = self.mlp(sorted_features)
 
-        # =========================================================
-        # 步骤 4: Transformer (带 Mask)
-        # =========================================================
-        # 我们生成一个 padding_mask，告诉 Transformer：
-        # “虽然矩阵是对齐的，但后面那些被我排过去的 0，你完全不要看，不要计算注意力。”
-        # True = 忽略 (Mask), False = 保留
-        padding_mask = ~sorted_mask
+        # 4. Transformer
+        # 生成 Padding Mask: True 表示要被忽略 (即 sorted_mask_bool 为 False 的部分)
+        padding_mask = ~sorted_mask_bool
 
-        # 这里的 Transformer 计算时，前排的有效向量只会互相 Attention
-        # 根本不会理会后面那些 0 向量，实现了“逻辑上的删除”
         transformer_out = self.transformer(projected_features, src_key_padding_mask=padding_mask)
 
         # =========================================================
-        # 步骤 5: 截取前 3 个
+        # 5. 截取 + 维度强制对齐 (核心修复)
         # =========================================================
-        # 因为我们排过序了，前 3 个一定是最有效的
-        final_output = transformer_out[:, :self.num_tokens, :]
+        curr_seq_len = transformer_out.shape[1]
 
-        # 强制补 0 (如果有效数量 < 3，比如只有1个有效，那第2、3个位置强制置0)
-        final_mask = padding_mask[:, :self.num_tokens]
+        if curr_seq_len >= self.num_tokens:
+            # 路径足够多，直接截取前 3 个
+            final_output = transformer_out[:, :self.num_tokens, :]
+            final_mask = padding_mask[:, :self.num_tokens]
+        else:
+            # 路径不够 (比如只有1条)，需要硬凑到 3 条
+            # 1. 拿出现有的
+            final_output = transformer_out
+
+            # 2. 生成全 0 的补丁
+            diff = self.num_tokens - curr_seq_len
+            zeros = torch.zeros((batch_size, diff, self.llm_hidden_dim), device=device, dtype=dtype)
+
+            # 3. 拼上去 -> [Batch, 3, 4096]
+            final_output = torch.cat([final_output, zeros], dim=1)
+
+            # 4. Mask 也要补 (补上的部分全是 True-忽略)
+            ones_mask = torch.ones((batch_size, diff), device=device, dtype=torch.bool)
+            final_mask = torch.cat([padding_mask, ones_mask], dim=1)
+
+        # 6. 最终清洗 (把 Mask 掉的位置强制置 0)
         final_output = final_output.masked_fill(final_mask.unsqueeze(-1), 0.0)
 
         return final_output

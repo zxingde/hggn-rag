@@ -1,24 +1,24 @@
 #!/bin/bash
 
-# ================= 配置区域 =================
-# 1. 你的 Llama2 模型路径 (HuggingFace 格式)
+# 指定 GPU
+export CUDA_VISIBLE_DEVICES=1,2,3
+
+# 关键：这里直接写死绝对路径，不要用变量引用了，防止前面定义错
+PKL_PATH="/home/bi3/zxd_env/GNN-RAG-main2/llm/final_finetune_corpus_webqsp.pkl"
 MODEL_PATH="NousResearch/Llama-2-7b-chat-hf"
+OUTPUT_DIR="save_models/RoG_WebQSP_GNN_Finetune_v2"
 
-# 2. 你刚生成的 .pkl 数据集路径
-DATA_PATH="/home/bi3/zxd_env/GNN-RAG-main2/llm/final_finetune_corpus_webqsp.pkl"
-
-# 3. 输出模型保存的文件夹 (每次实验建议换个名字)
-OUTPUT_DIR="output/webqsp_finetune_v1"
-
-# 4. GNN 特征维度 (必须是 50)
-GNN_INPUT_DIM=50
-# ===========================================
-
-# 启动分布式训练 (单机多卡或单机单卡)
-torchrun --nproc_per_node=1 --master_port=29500 llm/src/joint_training/joint_finetuning.py \
-    --model_name_or_path $MODEL_PATH \
-    --data_path $DATA_PATH \
-    --output_dir $OUTPUT_DIR \
+# 启动命令
+accelerate launch --multi_gpu --num_processes 3 --mixed_precision "bf16" src/joint_training/joint_finetuning.py \
+    --data_path_list "$PKL_PATH"  \
+    --model_name_or_path "$MODEL_PATH" \
+    --output_dir "$OUTPUT_DIR" \
+    --add_rel_token False \
+    --bf16 True \
+    --use_peft True \
+    --lora_r 8 \
+    --lora_alpha 16 \
+    --lora_target_modules "q_proj,v_proj" \
     --num_train_epochs 3 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 4 \
@@ -26,20 +26,15 @@ torchrun --nproc_per_node=1 --master_port=29500 llm/src/joint_training/joint_fin
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
-    --save_total_limit 2 \
-    --learning_rate 2e-5 \
+    --save_total_limit 1 \
+    --learning_rate 2e-4 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 10 \
-    --model_max_length 2048 \
+    --logging_steps 1 \
+    --tf32 True \
+    --report_to "wandb" \
     --gradient_checkpointing True \
-    --deepspeed llm/config/deepspeed_zero3.yml \
-    --gnn_input_dim $GNN_INPUT_DIM \
-    --gnn_hidden_dim 4096 \
-    --tune_gnn True \
-    --use_lora True \
-    --lora_r 8 \
-    --lora_alpha 16 \
-    --lora_target_modules "q_proj,v_proj" \
-    --bf16 True
+    --run_name "RoG_WebQSP_Run3" \
+    --gnn_input_dim 50 \
+    --num_graph_tokens 3
