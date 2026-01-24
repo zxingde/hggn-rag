@@ -6,13 +6,16 @@ import os
 from tqdm import tqdm
 
 # ========================== 配置区域 ==========================
-ID_SOURCE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/datasets/AlignData/RoG-webqsp/RoG-webqsp_train.jsonl"
-TEXT_SOURCE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/datasets/joint_training/qa/RoG-webqsp/RoG-webqsp_train.jsonl"
-FEATURE_CACHE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/gnn/checkpoint/pretrain/0117-HGNN-webqsp_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
-ENTITY_MID_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/gnn/data/webqsp/entities.txt"
+# ID_SOURCE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/datasets/AlignData/RoG-webqsp/RoG-webqsp_train.jsonl"
+ID_SOURCE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/datasets/AlignData/RoG-cwq/RoG-cwq_train.jsonl"
+# TEXT_SOURCE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/datasets/joint_training/qa/RoG-webqsp/RoG-webqsp_train.jsonl"
+TEXT_SOURCE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/datasets/joint_training/qa/RoG-cwq/RoG-cwq_train.jsonl"
+FEATURE_CACHE_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/gnn/checkpoint/pretrain/0117-HGNN-CWQ_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
+ENTITY_MID_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/gnn/data/CWQ/entities.txt"
 ENTITY_NAMES_FILE = "/home/bi3/zxd_env/GNN-RAG-main2/llm/entities_names.json"
 
-OUTPUT_FILE = "final_train_dataset_webqsp.pkl"
+# OUTPUT_FILE = "final_train_dataset_webqsp.pkl"
+OUTPUT_FILE = "final_train_dataset_cwq.pkl"
 FEATURE_DIM = 50
 
 

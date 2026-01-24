@@ -8,7 +8,7 @@ MODEL_PATH="NousResearch/Llama-2-7b-chat-hf"
 DATASET_LIST="/home/bi3/zxd_env/GNN-RAG-main2/llm/final_finetune_corpus_webqsp.pkl"
 
 # 3. 设置保存路径
-SAVE_NAME="RoG_WebQSP_GNN_Finetune_Len4096"
+SAVE_NAME="RoG_WebQSP_GNN_Finetune_Len4096_1"
 SAVE_PATH="save_models/${SAVE_NAME}"
 ADD_REL=False
 

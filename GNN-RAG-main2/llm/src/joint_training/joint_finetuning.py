@@ -85,9 +85,30 @@ class GraphLLMForTraining(nn.Module):
 
             # 4. 扩展 Labels (用于计算 Loss，前缀部分忽略)
             if labels is not None:
-                # 【修改】使用 self.num_tokens (3)
                 prefix_labels = torch.full((batch_size, self.num_tokens), -100, device=labels.device, dtype=torch.long)
                 labels = torch.cat([prefix_labels, labels], dim=1)
+
+                # 【新增 DEBUG 代码】 只打印第一个 batch 的第一个样本
+                # 这里的 batch_idx 是为了防止刷屏，可以设个全局变量或者只打印一次
+                if not hasattr(self, "_debug_printed"):
+                    self._debug_printed = True
+                    print("\n" + "=" * 50)
+                    print("【DEBUG】正在检查第一个 Batch 的 Labels...")
+                    print(f"Total Label Length: {labels.shape[1]}")
+
+                    # 统计有多少个非 -100 的有效 Label
+                    valid_count = (labels[0] != -100).sum().item()
+                    print(f"Valid Labels Count (非-100数量): {valid_count}")
+
+                    if valid_count > 0:
+                        # 打印出具体的有效 Label 值
+                        valid_labels = labels[0][labels[0] != -100]
+                        print(f"Valid Labels Content: {valid_labels}")
+                        # 尝试解码回文本看看是啥 (假设你有 tokenizer，没有也没关系，看数字就行)
+                    else:
+                        print("❌ 严重错误：有效 Label 数量为 0！模型在用空气计算 Loss！")
+
+                    print("=" * 50 + "\n")
 
         return self.base_model(
             inputs_embeds=inputs_embeds,
