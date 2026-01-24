@@ -90,6 +90,7 @@ def train():
         script_args.model_name_or_path,
         trust_remote_code=True,
         use_auth_token=True,
+        torch_dtype=torch.bfloat16,
     )
 
     model.config.use_cache = False

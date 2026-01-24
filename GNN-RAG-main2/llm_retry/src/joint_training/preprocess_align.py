@@ -11,7 +11,7 @@ save_dir = "datasets/joint_training/align"
 prompt_path = "prompts/llama2.txt"
 data_template = "datasets/AlignData/{}/{}_train.jsonl"
 data_list = ['RoG-webqsp', 'RoG-cwq']
-model_name_or_path = "meta-llama/Llama-2-7b-chat-hf"
+model_name_or_path = "NousResearch/Llama-2-7b-chat-hf"
 prompter = InstructFormater(prompt_path)
 
 INSTRUCTION = """Please generate a valid relation path that can be helpful for answering the following question: """

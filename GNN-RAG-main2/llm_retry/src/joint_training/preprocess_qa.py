@@ -14,7 +14,7 @@ split="train"
 model_max_length = 2048 - 200
 data_list = ['RoG-webqsp', 'RoG-cwq']
 data_path = "rmanluo"
-model_name_or_path = "meta-llama/Llama-2-7b-chat-hf"
+model_name_or_path = "NousResearch/Llama-2-7b-chat-hf"
 prompter = InstructFormater(prompt_path)
 
 tokenizer = AutoTokenizer.from_pretrained(
