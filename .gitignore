@@ -37,3 +37,9 @@ GNN-RAG-main2/llm/wandb/GNN-RAG-main2/llm/
 GNN-RAG-main2/llm_retry/
 GNN-RAG-main2/llm/
 GNN-RAG-main2/llm_retry/
+GNN-RAG-main2/llm_project/datasets
+GNN-RAG-main2/llm_project/results
+GNN-RAG-main2/llm_project/RoG_*
+GNN-RAG-main2/llm_project/save_models
+GNN-RAG-main2/llm_project/wandb
+entities_names.json
