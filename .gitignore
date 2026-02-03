@@ -33,4 +33,5 @@ GNN-RAG-main2/gnn/sbert/
 GNN-RAG-main2/llm/datasets/
 GNN-RAG-main2/llm/results/
 GNN-RAG-main2/llm/save_models/
-GNN-RAG-main2/llm/wandb/
+GNN-RAG-main2/llm/wandb/GNN-RAG-main2/llm/
+GNN-RAG-main2/llm_retry/
