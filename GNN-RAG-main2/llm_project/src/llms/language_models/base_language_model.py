@@ -30,7 +30,7 @@ class BaseLanguageModel(object):
         '''
         raise NotImplementedError
 
-    def generate_sentence(self, lm_input):
+    def generate_sentence(self, lm_input, **kwargs):
         """
         Generate sentence by using a LM
 
