@@ -1,6 +1,7 @@
 import sys
 import os
 
+
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
 import utils
 import argparse
@@ -14,7 +15,7 @@ import json
 from multiprocessing import Pool
 from qa_prediction.build_qa_input import PromptBuilder
 from functools import partial
-from src.models.projector import StructureProjector
+from models.projector import StructureProjector
 import torch
 
 import json
@@ -132,7 +133,31 @@ def prediction(data, processed_list, input_builder, model, encrypt=False, data_f
     question = data["question"]
     answer = data["answer"]
     entities = data['q_entity']
+    # ================= ��️‍♂️ 调试插桩开始 =================
+    print("\n" + "=" * 50)
+    print("�� [DEBUG] 正在检查第一条数据")
+    print("=" * 50)
 
+    # 1. 打印 ID (这是最关键的，看它是 'WebQTest-0' 还是 '0')
+    print(f"�� ID 类型: {type(data.get('id'))}")
+    print(f"�� ID 值  : {data.get('id')}")
+
+    # 2. 打印问题
+    print(f"❓ 问题   : {data.get('question')}")
+
+    # 3. 打印所有字段名 (检查是否有 predicted_paths)
+    print(f"�� 包含字段: {list(data.keys())}")
+
+    # 4. 看看路径长什么样 (如果有的话)
+    if 'predicted_paths' in data:
+        print(f"��️ 路径示例: {data['predicted_paths'][:1]}")
+
+    print("=" * 50 + "\n")
+
+    # �� 打印完第一条直接退出，节省时间
+    print("�� 调试完成，强制退出。")
+    sys.exit(0)
+    # ================= ��️‍♂️ 调试插桩结束 =================
     data["cand"] = None
     id = data["id"]
     if data_file_gnn is not None:
@@ -282,73 +307,73 @@ def main(args, LLM):
         )
     projector = None
     # 假设 args.device 已经定义 (通常是 'cuda' 或 'cpu')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 这里判断：如果你在命令行传了 --feature_path (说明要用 GNN 特征)，就初始化 projector
-    if hasattr(args, 'feature_path') and args.feature_path:
-        print(f"Initializing StructureProjector on {device}...")
-
-        # ⚠️ 注意：这里参数要跟你训练时保持一致
-        # gnn_dim=50 (你的 GNN 输出维度)
-        # llm_dim=4096 (Llama-2-7b 的维度)
-        # num_tokens=2 (你设定的固定 Token 数)
-        projector = StructureProjector(gnn_dim=50, llm_dim=4096, num_tokens=2)
-
-        # 加载训练好的权重 (如果有)
-        if hasattr(args, 'projector_path') and args.projector_path and os.path.exists(args.projector_path):
-            print(f"Loading Projector weights from {args.projector_path}")
-            projector.load_state_dict(torch.load(args.projector_path, map_location=device))
-        else:
-            print("⚠️ Warning: Projector using random weights! (Results may be random)")
-
-        projector.to(device)
-        # projector.eval()  # 开启推理模式 (冻结 Dropout/Batchnorm 等)
-    # ===================================================================
-    graph_features = None
-
-    # 定义你的特征文件所在的目录
-    feature_dir = "gnn-fet"  # 你说的文件夹名字
-
-    # 自动判断要加载哪个文件
-    # args.d 通常包含数据集名字，例如 "RoG-webqsp" 或 "RoG-cwq"
-    dataset_name = args.d.lower()
-    feature_path = None
-
-    if "cwq" in dataset_name:
-        feature_filename = "0117-HGNN-CWQ_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
-        feature_path = os.path.join(feature_dir, feature_filename)
-        print(f"检测到数据集为 CWQ，准备加载特征文件: {feature_path}")
-
-    elif "webqsp" in dataset_name:
-        feature_filename = "0117-HGNN-webqsp_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
-        feature_path = os.path.join(feature_dir, feature_filename)
-        print(f"检测到数据集为 WebQSP，准备加载特征文件: {feature_path}")
-
-    else:
-        # 如果 args.d 里没写，也可以允许通过参数 --feature_path 强制指定
-        if hasattr(args, 'feature_path') and args.feature_path:
-            feature_path = args.feature_path
-            print(f"未识别数据集，使用命令行指定的特征文件: {feature_path}")
-        else:
-            print("⚠️ 警告: 未检测到 CWQ 或 WebQSP 关键字，且未指定 feature_path，将跳过 GNN 特征加载。")
-
-    # 执行加载
-    if feature_path and os.path.exists(feature_path):
-        print(f"正在加载 GNN 特征... 这可能需要几秒钟...")
-        try:
-            with open(feature_path, 'rb') as f:
-                graph_features = pickle.load(f)
-            print(f"✅ 成功加载特征库，共包含 {len(graph_features)} 条数据的特征。")
-
-            # 【可选检查】打印一条看看格式对不对
-            # first_key = list(graph_features.keys())[0]
-            # print(f"示例特征 Shape: {graph_features[first_key].shape}")
-
-        except Exception as e:
-            print(f"❌ 加载特征文件失败: {e}")
-            graph_features = None
-    else:
-        if feature_path:
-            print(f"❌ 错误: 找不到文件 {feature_path}，请检查路径。")
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # # 这里判断：如果你在命令行传了 --feature_path (说明要用 GNN 特征)，就初始化 projector
+    # if hasattr(args, 'feature_path') and args.feature_path:
+    #     print(f"Initializing StructureProjector on {device}...")
+    #
+    #     # ⚠️ 注意：这里参数要跟你训练时保持一致
+    #     # gnn_dim=50 (你的 GNN 输出维度)
+    #     # llm_dim=4096 (Llama-2-7b 的维度)
+    #     # num_tokens=2 (你设定的固定 Token 数)
+    #     projector = StructureProjector(gnn_dim=50, llm_dim=4096, num_tokens=2)
+    #
+    #     # 加载训练好的权重 (如果有)
+    #     if hasattr(args, 'projector_path') and args.projector_path and os.path.exists(args.projector_path):
+    #         print(f"Loading Projector weights from {args.projector_path}")
+    #         projector.load_state_dict(torch.load(args.projector_path, map_location=device))
+    #     else:
+    #         print("⚠️ Warning: Projector using random weights! (Results may be random)")
+    #
+    #     projector.to(device)
+    #     # projector.eval()  # 开启推理模式 (冻结 Dropout/Batchnorm 等)
+    # # ===================================================================
+    # graph_features = None
+    #
+    # # 定义你的特征文件所在的目录
+    # feature_dir = "gnn-fet"  # 你说的文件夹名字
+    #
+    # # 自动判断要加载哪个文件
+    # # args.d 通常包含数据集名字，例如 "RoG-webqsp" 或 "RoG-cwq"
+    # dataset_name = args.d.lower()
+    # feature_path = None
+    #
+    # if "cwq" in dataset_name:
+    #     feature_filename = "0117-HGNN-CWQ_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
+    #     feature_path = os.path.join(feature_dir, feature_filename)
+    #     print(f"检测到数据集为 CWQ，准备加载特征文件: {feature_path}")
+    #
+    # elif "webqsp" in dataset_name:
+    #     feature_filename = "0117-HGNN-webqsp_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
+    #     feature_path = os.path.join(feature_dir, feature_filename)
+    #     print(f"检测到数据集为 WebQSP，准备加载特征文件: {feature_path}")
+    #
+    # else:
+    #     # 如果 args.d 里没写，也可以允许通过参数 --feature_path 强制指定
+    #     if hasattr(args, 'feature_path') and args.feature_path:
+    #         feature_path = args.feature_path
+    #         print(f"未识别数据集，使用命令行指定的特征文件: {feature_path}")
+    #     else:
+    #         print("⚠️ 警告: 未检测到 CWQ 或 WebQSP 关键字，且未指定 feature_path，将跳过 GNN 特征加载。")
+    #
+    # # 执行加载
+    # if feature_path and os.path.exists(feature_path):
+    #     print(f"正在加载 GNN 特征... 这可能需要几秒钟...")
+    #     try:
+    #         with open(feature_path, 'rb') as f:
+    #             graph_features = pickle.load(f)
+    #         print(f"✅ 成功加载特征库，共包含 {len(graph_features)} 条数据的特征。")
+    #
+    #         # 【可选检查】打印一条看看格式对不对
+    #         # first_key = list(graph_features.keys())[0]
+    #         # print(f"示例特征 Shape: {graph_features[first_key].shape}")
+    #
+    #     except Exception as e:
+    #         print(f"❌ 加载特征文件失败: {e}")
+    #         graph_features = None
+    # else:
+    #     if feature_path:
+    #         print(f"❌ 错误: 找不到文件 {feature_path}，请检查路径。")
 
     # ================================================================
     # Save args file
@@ -384,8 +409,8 @@ def main(args, LLM):
         for data in tqdm(dataset):
             res = prediction(data, processed_list, input_builder, model, encrypt=args.encrypt, data_file_gnn=data_file_gnn,
                              projector=projector,
-                             graph_features=graph_features,
-                             device=args.device
+                             graph_features=None,
+                             device=None
                              )
             if res is not None:
                 if args.debug:

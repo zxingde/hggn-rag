@@ -42,7 +42,7 @@ BEAM_LIST="3" # "1 2 3 4 5"
              --rule_path_g1 ${RULE_PATH_G1} \
              --rule_path_g2 ${RULE_PATH_G2} \
              --model_path /home/bi3/zxd_env/GNN-RAG-main2/llm_retry/RoG_model \
-             --predict_path results/KGQA-GNN-RAG-RA/rearev-sbert_0130_ra-HGNN
+             --predict_path results/KGQA-GNN-RAG-RA/rearev-sbert_0130_ra-HGNN_temp
             
      done
  done
