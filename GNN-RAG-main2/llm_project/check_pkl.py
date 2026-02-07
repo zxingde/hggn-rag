@@ -5,7 +5,7 @@ import torch  # 导入 torch 以便查看 tensor 形状
 
 # 你的文件路径
 # PKL_PATH = "gnn-fet/0117-HGNN-webqsp_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
-PKL_PATH = "gnn-fet/0117-HGNN-CWQ_LMSR_BS24_4090_EXPORT_2_graph_features.pkl"
+PKL_PATH = "/home/bi3/zxd_env/GNN-RAG-main2/gnn/checkpoint/pretrain/0117-HGNN-WebQSP_LMSR_BS24_4090_3_all_features.pkl"
 
 
 def inspect_pickle():

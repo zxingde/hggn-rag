@@ -133,31 +133,6 @@ def prediction(data, processed_list, input_builder, model, encrypt=False, data_f
     question = data["question"]
     answer = data["answer"]
     entities = data['q_entity']
-    # ================= ��️‍♂️ 调试插桩开始 =================
-    print("\n" + "=" * 50)
-    print("�� [DEBUG] 正在检查第一条数据")
-    print("=" * 50)
-
-    # 1. 打印 ID (这是最关键的，看它是 'WebQTest-0' 还是 '0')
-    print(f"�� ID 类型: {type(data.get('id'))}")
-    print(f"�� ID 值  : {data.get('id')}")
-
-    # 2. 打印问题
-    print(f"❓ 问题   : {data.get('question')}")
-
-    # 3. 打印所有字段名 (检查是否有 predicted_paths)
-    print(f"�� 包含字段: {list(data.keys())}")
-
-    # 4. 看看路径长什么样 (如果有的话)
-    if 'predicted_paths' in data:
-        print(f"��️ 路径示例: {data['predicted_paths'][:1]}")
-
-    print("=" * 50 + "\n")
-
-    # �� 打印完第一条直接退出，节省时间
-    print("�� 调试完成，强制退出。")
-    sys.exit(0)
-    # ================= ��️‍♂️ 调试插桩结束 =================
     data["cand"] = None
     id = data["id"]
     if data_file_gnn is not None:
