@@ -43,13 +43,10 @@ class ProjectorDataset(Dataset):
         qid = item.get('id')
 
         # --- A. 准备文本 (Input + Label) ---
-        # 简单构造: Question -> Answer
         question = item.get('text', item.get('input', ''))
         answer = item.get('answer', '')
-        if isinstance(answer, list): answer = answer[0]  # 处理 WebQSP 列表情况
+        if isinstance(answer, list): answer = answer[0]
 
-        # 构造训练文本
-        # 注意：这里假设用简单的 Q: A: 格式，你可以根据模型调整
         full_text = f"Question: {question}\nAnswer: {answer}"
 
         tokenized = self.tokenizer(
@@ -62,18 +59,20 @@ class ProjectorDataset(Dataset):
 
         input_ids = tokenized.input_ids[0]
         attention_mask = tokenized.attention_mask[0]
-        labels = input_ids.clone()  # 自回归训练
+        labels = input_ids.clone()
 
         # --- B. 获取图特征 ---
         # 默认值 (1, 50) 全0
         graph_vecs = torch.zeros((1, 50), dtype=torch.float32)
-        graph_mask = torch.zeros(1, dtype=torch.long)  # mask=0 表示无效
+
+        # �� 核心修改：默认 mask 设为 1，而不是 0
+        # 这样即使是全0向量，也能正常过 Softmax，不会 NaN
+        graph_mask = torch.ones(1, dtype=torch.long)
 
         if qid and qid in self.graph_features:
             features = self.graph_features[qid]
             # 确保 features 是有效的 numpy array 且不是全0
             if isinstance(features, np.ndarray) and features.shape[0] > 0:
-                # 检查是否全是0 (我们在预处理时对无路径的填了全0)
                 if not np.all(features == 0):
                     graph_vecs = torch.tensor(features, dtype=torch.float32)
                     graph_mask = torch.ones(len(graph_vecs), dtype=torch.long)

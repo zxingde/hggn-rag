@@ -5,15 +5,15 @@ from src.models.projector import GraphProjector  # 引用刚才写的
 
 
 class HGNN_RAG_Model(nn.Module):
-    def __init__(self, llm_path, freeze_llm=True):
+    def __init__(self, llm_path, freeze_llm=True, device_map="auto"):
         super().__init__()
         print(f"�� [Model] Loading LLM from: {llm_path}")
 
         # 加载 LLM
         self.llm = AutoModelForCausalLM.from_pretrained(
             llm_path,
-            torch_dtype=torch.float16,
-            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            device_map=device_map,
             trust_remote_code=True
         )
 
@@ -24,7 +24,7 @@ class HGNN_RAG_Model(nn.Module):
         # 初始化 Projector
         self.projector = GraphProjector(input_dim=50, output_dim=embed_dim)
         # 确保 Projector 也是 float16 (和 LLM 对齐)
-        self.projector = self.projector.to(dtype=self.llm.dtype).cuda()
+        self.projector = self.projector.to(dtype=self.llm.dtype)
 
         # 冻结 LLM
         if freeze_llm:

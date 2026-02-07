@@ -4,8 +4,10 @@ import argparse
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AdamW
 from tqdm import tqdm
+# �� 引入分布式训练核心库
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
-# 引用刚才写好的模块
+# 引用模块
 from src.projector_dataset import ProjectorDataset, collate_fn
 from src.hgnn_rag_model import HGNN_RAG_Model
 
@@ -14,25 +16,29 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="cwq", help="cwq or webqsp")
     parser.add_argument("--llm_path", type=str, required=True, help="Path to LLM")
-    parser.add_argument("--output_dir", type=str, default="./checkpoints/projector_v1")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--output_dir", type=str, default="./checkpoints/projector_ddp")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=2e-5)
     args = parser.parse_args()
 
-    # --- 1. 路径配置 ---
-    # 假设你在 llm_project 目录下运行
-    base_dir = os.getcwd()
-    # 适配你之前的目录结构
-    jsonl_path = os.path.join(base_dir, f"datasets/llm_project/dataset/{args.dataset}/train.jsonl")
-    # pkl 路径 (请确保这里和你生成的 pkl 文件名一致)
-    # pkl_path = os.path.join(base_dir, f"{args.dataset}_train_id_to_path_vectors.pkl")
-    pkl_path = os.path.join(base_dir, f"datasets/llm_project/pkl/{args.dataset}/train.pkl")
+    # --- 1. 初始化 Accelerator (关键步骤) ---
+    # find_unused_parameters=True 是必须的，因为 LLM 参数被冻结了，不会产生梯度
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
 
-    print(f"�� Training Config:")
-    print(f"   LLM: {args.llm_path}")
-    print(f"   JSONL: {jsonl_path}")
-    print(f"   PKL: {pkl_path}")
+    if accelerator.is_main_process:
+        print(f"�� Distributed Training on {accelerator.num_processes} GPUs!")
+        print(f"   Total Batch Size: {args.batch_size * accelerator.num_processes}")
+
+    # 路径配置
+    base_dir = os.getcwd()
+    jsonl_path = os.path.join(base_dir, f"datasets/llm_project/dataset/{args.dataset}/train.jsonl")
+    pkl_path = os.path.join(base_dir, f"datasets/llm_project/pkl/{args.dataset}/train.pkl")  # 确保路径对应你实际的pkl位置
+
+    if accelerator.is_main_process:
+        print(f"   JSONL: {jsonl_path}")
+        print(f"   PKL: {pkl_path}")
 
     # --- 2. Tokenizer & Dataset ---
     tokenizer = AutoTokenizer.from_pretrained(args.llm_path, use_fast=False)
@@ -40,6 +46,8 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = ProjectorDataset(jsonl_path, pkl_path, tokenizer)
+
+    # 注意：Accelerator 会自动处理 DataLoader 的 sampler，这里 shuffle=True 没问题
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -48,65 +56,68 @@ def main():
         num_workers=4
     )
 
-    # --- 3. Model ---
-    model = HGNN_RAG_Model(args.llm_path, freeze_llm=True)
+    # --- 3. 模型加载 (DDP 显存优化关键) ---
+    # 构造 device_map，让当前进程只在指定的 GPU 上加载模型
+    # 如果不这么做，transformers 可能会尝试在每张卡上加载所有层，导致 OOM
+    device_index = {"": accelerator.process_index}
 
-    # --- 4. Optimizer ---
-    # 只训练 Projector 的参数
+    model = HGNN_RAG_Model(args.llm_path, freeze_llm=True, device_map=device_index)
+
+    # 优化器只训练 Projector
     optimizer = AdamW(model.projector.parameters(), lr=args.lr)
 
-    # --- 5. Training Loop ---
-    os.makedirs(args.output_dir, exist_ok=True)
+    # --- 4. Prepare ---
+    # Accelerator 接管模型、优化器和数据加载器
+    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
+    if accelerator.is_main_process:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    # --- 5. 训练循环 ---
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+
+        # 只有主进程显示进度条，避免 4 个进度条刷屏
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}",
+                            disable=not accelerator.is_main_process)
 
         for step, batch in enumerate(progress_bar):
-            # 转移到 GPU
-            batch = {k: v.cuda() for k, v in batch.items()}
+            # �� 移除 .cuda()，Accelerator 会自动处理设备分配
 
             optimizer.zero_grad()
 
             outputs = model(**batch)
             loss = outputs.loss
 
-            loss.backward()
-            # ��【新增】调试：打印梯度信息
-            if step % 10 == 0:  # 每 10 步打印一次，防止刷屏
-                print(f"\n�� [Step {step}] Gradient Check:")
-                total_norm = 0.0
-                has_nan = False
-                for name, param in model.projector.named_parameters():
-                    if param.grad is not None:
-                        grad_norm = param.grad.data.norm(2).item()
-                        total_norm += grad_norm
-                        print(f"   - {name}: norm={grad_norm:.4f}, mean={param.grad.mean():.6f}")
+            # �� 使用 accelerator.backward 代替 loss.backward
+            accelerator.backward(loss)
 
-                        if torch.isnan(param.grad).any():
-                            print(f"   ⚠️ ALERT: NaN gradient in {name}!")
-                            has_nan = True
-                    else:
-                        print(f"   - {name}: No Gradient! (Check freeze logic)")
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(model.projector.parameters(), 1.0)
 
-                print(f"   === Total Grad Norm: {total_norm:.4f} ===")
-                if has_nan:
-                    print("❌ Stopping due to NaN gradient.")
-                    break
-            torch.nn.utils.clip_grad_norm_(model.projector.parameters(), max_norm=1.0)
             optimizer.step()
 
-            total_loss += loss.item()
-            progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+            # 收集所有 GPU 的 Loss 用于显示（仅用于打印，不影响训练）
+            all_loss = accelerator.gather(loss).mean().item()
+            total_loss += all_loss
 
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch + 1} Done. Avg Loss: {avg_loss:.4f}")
+            if accelerator.is_main_process:
+                progress_bar.set_postfix({"loss": f"{all_loss:.4f}"})
 
-        # 保存
-        save_file = os.path.join(args.output_dir, f"projector_epoch_{epoch + 1}.bin")
-        torch.save(model.projector.state_dict(), save_file)
-        print(f"�� Saved projector to {save_file}")
+        # --- 6. 保存模型 (只在主进程) ---
+        accelerator.wait_for_everyone()  # 等待所有卡跑完当前 Epoch
+
+        if accelerator.is_main_process:
+            avg_loss = total_loss / len(dataloader)
+            print(f"Epoch {epoch + 1} Done. Avg Loss: {avg_loss:.4f}")
+
+            save_file = os.path.join(args.output_dir, f"projector_epoch_{epoch + 1}.bin")
+
+            # 获取原始模型（去除 DDP 包装）并保存 projector
+            unwrapped_model = accelerator.unwrap_model(model)
+            torch.save(unwrapped_model.projector.state_dict(), save_file)
+            print(f"�� Saved projector to {save_file}")
 
 
 if __name__ == "__main__":
