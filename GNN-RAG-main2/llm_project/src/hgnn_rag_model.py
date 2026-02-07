@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
-from models.projector import GraphProjector  # 引用刚才写的
+from src.models.projector import GraphProjector  # 引用刚才写的
 
 
 class HGNN_RAG_Model(nn.Module):
@@ -24,7 +24,7 @@ class HGNN_RAG_Model(nn.Module):
         # 初始化 Projector
         self.projector = GraphProjector(input_dim=50, output_dim=embed_dim)
         # 确保 Projector 也是 float16 (和 LLM 对齐)
-        self.projector = self.projector.half().cuda()
+        self.projector = self.projector.to(dtype=self.llm.dtype).cuda()
 
         # 冻结 LLM
         if freeze_llm:

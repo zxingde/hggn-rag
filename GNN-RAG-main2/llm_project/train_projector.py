@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./checkpoints/projector_v1")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-5)
     args = parser.parse_args()
 
     # --- 1. 路径配置 ---
@@ -26,7 +26,8 @@ def main():
     # 适配你之前的目录结构
     jsonl_path = os.path.join(base_dir, f"datasets/llm_project/dataset/{args.dataset}/train.jsonl")
     # pkl 路径 (请确保这里和你生成的 pkl 文件名一致)
-    pkl_path = os.path.join(base_dir, f"{args.dataset}_train_id_to_path_vectors.pkl")
+    # pkl_path = os.path.join(base_dir, f"{args.dataset}_train_id_to_path_vectors.pkl")
+    pkl_path = os.path.join(base_dir, f"datasets/llm_project/pkl/{args.dataset}/train.pkl")
 
     print(f"�� Training Config:")
     print(f"   LLM: {args.llm_path}")
@@ -62,7 +63,7 @@ def main():
         total_loss = 0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
 
-        for batch in progress_bar:
+        for step, batch in enumerate(progress_bar):
             # 转移到 GPU
             batch = {k: v.cuda() for k, v in batch.items()}
 
@@ -72,6 +73,28 @@ def main():
             loss = outputs.loss
 
             loss.backward()
+            # ��【新增】调试：打印梯度信息
+            if step % 10 == 0:  # 每 10 步打印一次，防止刷屏
+                print(f"\n�� [Step {step}] Gradient Check:")
+                total_norm = 0.0
+                has_nan = False
+                for name, param in model.projector.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.data.norm(2).item()
+                        total_norm += grad_norm
+                        print(f"   - {name}: norm={grad_norm:.4f}, mean={param.grad.mean():.6f}")
+
+                        if torch.isnan(param.grad).any():
+                            print(f"   ⚠️ ALERT: NaN gradient in {name}!")
+                            has_nan = True
+                    else:
+                        print(f"   - {name}: No Gradient! (Check freeze logic)")
+
+                print(f"   === Total Grad Norm: {total_norm:.4f} ===")
+                if has_nan:
+                    print("❌ Stopping due to NaN gradient.")
+                    break
+            torch.nn.utils.clip_grad_norm_(model.projector.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()
