@@ -94,7 +94,8 @@ def main():
             accelerator.backward(loss)
 
             if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.projector.parameters(), 1.0)
+                unwrapped_model = accelerator.unwrap_model(model)
+                accelerator.clip_grad_norm_(unwrapped_model.projector.parameters(), 1.0)
 
             optimizer.step()
 

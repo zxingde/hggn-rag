@@ -38,8 +38,8 @@ class HGNN_RAG_Model(nn.Module):
 
         # 2. 图特征 Embedding
         # 确保类型一致 (half)
-        graph_feats = graph_feats.to(inputs_embeds.dtype).cuda()
-        graph_mask = graph_mask.cuda()
+        graph_feats = graph_feats.to(inputs_embeds.dtype)
+        graph_mask = graph_mask
 
         # [Batch, 1, 4096]
         graph_token = self.projector(graph_feats, graph_mask)
