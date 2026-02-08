@@ -2,53 +2,26 @@ import json
 import pickle
 import torch
 import os
-import sys
 import numpy as np
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
-# �� 关键修改：直接引入作者的 PromptBuilder，保证格式绝对一致
-# 假设当前运行路径在 llm_project 下，根据你的目录结构添加路径
-sys.path.append(os.path.join(os.path.dirname(__file__)))
-from qa_prediction.build_qa_input import PromptBuilder
-
 
 class ProjectorDataset(Dataset):
-    def __init__(self, jsonl_path, pkl_path, tokenizer, max_length=512, prompt_path="prompts/llama2_predict.txt"):
+    def __init__(self, jsonl_path, pkl_path, tokenizer, max_length=512):
         self.data = []
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        # 1. 初始化 PromptBuilder (直接复用原项目逻辑)
-        # 注意：这里参数要和 predict_answer.py 里的保持一致
-        if not os.path.exists(prompt_path):
-            # 回退路径尝试
-            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), prompt_path)
-
-        print(f"�� [Dataset] Initializing PromptBuilder with {prompt_path}")
-        self.prompt_builder = PromptBuilder(
-            prompt_path=prompt_path,
-            encrypt=False,  # 根据需要调整
-            add_rule=True,  # Projector 模式下通常不用显式 Rule 文本，因为图特征里有了
-            use_true=False,
-            cot=False
-        )
-
-        # 2. 加载数据
         print(f"�� [Dataset] Loading Text from: {jsonl_path}")
+        # 纯加载，不搞任何花哨的 builder
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
                 try:
-                    item = json.loads(line)
-                    # 预处理：有些数据集可能缺字段，补齐默认值防止 PromptBuilder 报错
-                    if 'choices' not in item: item['choices'] = []
-                    if 'cand' not in item: item['cand'] = None
-                    if 'q_entity' not in item: item['q_entity'] = []
-                    self.data.append(item)
+                    self.data.append(json.loads(line))
                 except:
                     continue
 
-        # 3. 加载图特征
         print(f"��️ [Dataset] Loading Graph Features from: {pkl_path}")
         with open(pkl_path, 'rb') as f:
             self.graph_features = pickle.load(f)
@@ -62,23 +35,32 @@ class ProjectorDataset(Dataset):
         item = self.data[idx]
         qid = item.get('id')
 
-        # --- A. 使用 PromptBuilder 生成 Input (核心对齐点) ---
-        # 这一步生成的 text 就会包含 [INST]...[/INST] 等所有细节
-        input_text = self.prompt_builder.process_input(item)
+        # --- A. 直接读取 Input ---
+        # 你的数据里 text 字段已经是完整的 [INST]...[/INST]
+        if 'text' in item:
+            input_text = item['text']
+        elif 'input' in item:  # 兼容某些数据集叫 input
+            input_text = item['input']
+        else:
+            # 万一没有预处理好的，才降级去读 question (通常不会走到这)
+            input_text = item.get('question', '')
 
-        # --- B. 获取 Answer ---
+        # --- B. 读取 Answer ---
+        # 尝试读取 answer/output/ground_truth
         if 'output' in item:
             answer = item['output']
-        elif 'answer' in item:
-            answer = item['answer']
         elif 'ground_truth' in item:
             answer = item['ground_truth']
+        elif 'answer' in item:
+            answer = item['answer']
         else:
             answer = ""
 
-        if isinstance(answer, list): answer = answer[0] if len(answer) > 0 else ""
+        # 如果是列表，取第一个作为训练目标
+        if isinstance(answer, list):
+            answer = answer[0] if len(answer) > 0 else ""
 
-        # --- C. 拼接 (Prompt + Answer) ---
+        # --- C. 拼接 (Input + Answer + EOS) ---
         full_text = f"{input_text} {answer} {self.tokenizer.eos_token}"
 
         tokenized = self.tokenizer(
@@ -91,9 +73,11 @@ class ProjectorDataset(Dataset):
 
         input_ids = tokenized.input_ids[0]
         attention_mask = tokenized.attention_mask[0]
+
+        # 训练 Projector 时，全量计算 Loss 是没问题的
         labels = input_ids.clone()
 
-        # --- D. 获取图特征 ---
+        # --- D. 图特征 (保持不变) ---
         graph_vecs = torch.zeros((1, 50), dtype=torch.float32)
         graph_mask = torch.ones(1, dtype=torch.long)
 
