@@ -73,53 +73,72 @@ def main():
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    # --- 5. 训练循环 ---
-    for epoch in range(args.epochs):
-        model.train()
-        total_loss = 0
+        # --- 5. 训练循环 ---
+        for epoch in range(args.epochs):
+            model.train()
+            total_loss = 0  # 每个 Epoch 清零
 
-        # 只有主进程显示进度条，避免 4 个进度条刷屏
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}",
-                            disable=not accelerator.is_main_process)
+            # 只有主进程显示进度条
+            progress_bar = tqdm(enumerate(dataloader),
+                                total=len(dataloader),
+                                desc=f"Epoch {epoch + 1}/{args.epochs}",
+                                disable=not accelerator.is_main_process)
 
-        for step, batch in enumerate(progress_bar):
-            # �� 移除 .cuda()，Accelerator 会自动处理设备分配
+            for step, batch in progress_bar:  # 注意这里改用了 enumerate(dataloader) 的方式
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
 
-            outputs = model(**batch)
-            loss = outputs.loss
+                # 前向传播
+                outputs = model(**batch)
+                loss = outputs.loss
 
-            # �� 使用 accelerator.backward 代替 loss.backward
-            accelerator.backward(loss)
+                # 反向传播
+                accelerator.backward(loss)
 
-            if accelerator.sync_gradients:
-                unwrapped_model = accelerator.unwrap_model(model)
-                accelerator.clip_grad_norm_(unwrapped_model.projector.parameters(), 1.0)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
 
-            optimizer.step()
+                optimizer.step()
 
-            # 收集所有 GPU 的 Loss 用于显示（仅用于打印，不影响训练）
-            all_loss = accelerator.gather(loss).mean().item()
-            total_loss += all_loss
+                # --- 核心：收集并累加 Loss ---
+                # gather 会把所有 GPU 的 loss 收集起来变成一个 tensor
+                # mean() 取平均，item() 转为 python float
+                current_batch_loss = accelerator.gather(loss).mean().item()
+
+                # 累加到 total_loss (注意：这是累加的平均值)
+                total_loss += current_batch_loss
+
+                # 实时显示当前 Batch 的 Loss
+                if accelerator.is_main_process:
+                    progress_bar.set_postfix({"batch_loss": f"{current_batch_loss:.4f}"})
+
+            # --- Epoch 结束后的处理 ---
+            accelerator.wait_for_everyone()
 
             if accelerator.is_main_process:
-                progress_bar.set_postfix({"loss": f"{all_loss:.4f}"})
+                # 计算整个 Epoch 的平均 Loss
+                # len(dataloader) 是步数 (steps per epoch)
+                avg_loss = total_loss / len(dataloader)
 
-        # --- 6. 保存模型 (只在主进程) ---
-        accelerator.wait_for_everyone()  # 等待所有卡跑完当前 Epoch
+                # �� 打印醒目的日志
+                print(f"\n{'=' * 30}")
+                print(f"✅ Epoch {epoch + 1} Finished!")
+                print(f"�� Average Loss: {avg_loss:.6f}")  # 保留6位小数看微小变化
+                print(f"{'=' * 30}\n")
 
-        if accelerator.is_main_process:
-            avg_loss = total_loss / len(dataloader)
-            print(f"Epoch {epoch + 1} Done. Avg Loss: {avg_loss:.4f}")
+                # 保存模型
+                save_file = os.path.join(args.output_dir, f"projector_epoch_{epoch + 1}.bin")
+                unwrapped_model = accelerator.unwrap_model(model)
+                # 确保只保存 projector 的权重
+                # 如果你的 model 是用 module.projector 访问的
+                if hasattr(unwrapped_model, 'projector'):
+                    state_dict = unwrapped_model.projector.state_dict()
+                else:
+                    # 防御性编程
+                    state_dict = unwrapped_model.state_dict()
 
-            save_file = os.path.join(args.output_dir, f"projector_epoch_{epoch + 1}.bin")
-
-            # 获取原始模型（去除 DDP 包装）并保存 projector
-            unwrapped_model = accelerator.unwrap_model(model)
-            torch.save(unwrapped_model.projector.state_dict(), save_file)
-            print(f"�� Saved projector to {save_file}")
-
+                torch.save(state_dict, save_file)
+                print(f"�� Saved projector to {save_file}")
 
 if __name__ == "__main__":
     main()

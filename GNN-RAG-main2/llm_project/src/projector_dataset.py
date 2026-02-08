@@ -35,34 +35,21 @@ class ProjectorDataset(Dataset):
         item = self.data[idx]
         qid = item.get('id')
 
-        # --- A. 直接读取 Input ---
-        # 你的数据里 text 字段已经是完整的 [INST]...[/INST]
+        # --- A. 直接读取 text (这是唯一的改动) ---
+        # 既然 text 已经是 [INST]...[/INST] Answer </s>
+        # 那我们直接拿来用就行了！
         if 'text' in item:
-            input_text = item['text']
-        elif 'input' in item:  # 兼容某些数据集叫 input
-            input_text = item['input']
+            full_text = item['text']
         else:
-            # 万一没有预处理好的，才降级去读 question (通常不会走到这)
-            input_text = item.get('question', '')
+            # 防御性编程：万一哪条数据没处理好，回退到原来的逻辑
+            # 但针对你的 WebQTrn 数据，应该都走上面
+            q = item.get('question', '')
+            a = item.get('output', '') or item.get('answer', '')
+            if isinstance(a, list): a = a[0]
+            full_text = f"Question: {q} Answer: {a}"
 
-        # --- B. 读取 Answer ---
-        # 尝试读取 answer/output/ground_truth
-        if 'output' in item:
-            answer = item['output']
-        elif 'ground_truth' in item:
-            answer = item['ground_truth']
-        elif 'answer' in item:
-            answer = item['answer']
-        else:
-            answer = ""
-
-        # 如果是列表，取第一个作为训练目标
-        if isinstance(answer, list):
-            answer = answer[0] if len(answer) > 0 else ""
-
-        # --- C. 拼接 (Input + Answer + EOS) ---
-        full_text = f"{input_text} {answer} {self.tokenizer.eos_token}"
-
+        # --- B. Tokenize ---
+        # 注意：因为 text 里已经有 </s> 了，所以这里不需要再加 self.tokenizer.eos_token
         tokenized = self.tokenizer(
             full_text,
             max_length=self.max_length,
@@ -74,10 +61,10 @@ class ProjectorDataset(Dataset):
         input_ids = tokenized.input_ids[0]
         attention_mask = tokenized.attention_mask[0]
 
-        # 训练 Projector 时，全量计算 Loss 是没问题的
+        # 训练 Projector 时，全量计算 Loss
         labels = input_ids.clone()
 
-        # --- D. 图特征 (保持不变) ---
+        # --- C. 图特征 (保持不变) ---
         graph_vecs = torch.zeros((1, 50), dtype=torch.float32)
         graph_mask = torch.ones(1, dtype=torch.long)
 
